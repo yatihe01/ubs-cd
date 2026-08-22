@@ -37,6 +37,10 @@ from typing import Any
 from challenges.showdown import phase_1, phase_2
 
 
+#: Identifies the deployed build. Bumped whenever behaviour changes, so that a
+#: disappointing replay can be attributed to a version rather than guessed at.
+BUILD = "p3-2026-08-22-explore-capped"
+
 DECK = 13
 NUMBERS = tuple(range(1, DECK + 1))
 TARGET_DELTA = 10
@@ -60,7 +64,7 @@ STACK_OFF_P = 0.82
 EXPLORE_MIN_CONFIDENCE = 0.45
 EXPLORE_CALL_CAP = 6
 EXPLORE_HANDS = 14
-EXPLORE_STACK_SHARE = 0.05
+EXPLORE_STACK_SHARE = 0.10
 # Where a read stops being provisional. Bet sizing rides this continuously, so
 # the first hand past the exploring threshold is not played at full size.
 CONFIDENT_AT = 0.85
