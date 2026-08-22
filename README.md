@@ -9,6 +9,7 @@ package and is exposed through a Flask Blueprint.
 - `GET /health` - Render health check
 - `POST /solve` - alias for the currently active challenge
 - `POST /adaptive-gateway/solve` - permanent Adaptive API Gateway endpoint
+- `POST /kan-cheong-delivery-driver` - batch Kan Chiong Delivery Driver endpoint
 
 ## Local setup
 
