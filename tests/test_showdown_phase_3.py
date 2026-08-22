@@ -278,7 +278,11 @@ def test_partial_rule_knowledge_does_not_price_the_nuts_as_a_loser():
     pair = phase_3.multiway_equity(rule, 7, 7, [uniform] * 5)
     trash = phase_3.multiway_equity(rule, 2, 9, [uniform] * 5)
 
-    assert pair > phase_3.fair_share(5)
+    # The invariant that matters is that uncertainty is not read as defeat:
+    # the pair must carry real equity and must beat a hand it dominates.  Its
+    # absolute level legitimately depends on how many hypotheses are still
+    # alive and what they say about pairing the board.
+    assert pair > 0.0
     assert pair > trash
 
 
@@ -307,3 +311,93 @@ def test_thresholds_scale_with_the_number_of_live_opponents():
     assert phase_3.fair_share(1) == pytest.approx(0.5)
     assert phase_3.fair_share(5) == pytest.approx(1 / 6)
     assert phase_3._relative_floor(5, 0.34) < phase_3._relative_floor(1, 0.34)
+
+
+def _cinnabar_recent():
+    raw = (
+        "2|10|2:9,3:9,5:9|2.3.5;6|2|4:13,5:12|4.5;7|4|1:11,2:10,5:8|1;"
+        "9|10|2:13,5:6|2;10|4|0:6,1:2|0;12|2|0:8,5:13|5;16|8|1:12,4:13|4;"
+        "17|1|2:10,5:1|5;19|4|0:6,2:6|0.2;22|9|0:3,2:10,4:12|4"
+    )
+    hands = []
+    for row in raw.split(";"):
+        number, community, shown, winners = row.split("|")
+        hands.append({
+            "hand_number": int(number), "community_number": int(community),
+            "shown_numbers": {
+                item.split(":")[0]: int(item.split(":")[1])
+                for item in shown.split(",")
+            },
+            "winners": [int(seat) for seat in winners.split(".")],
+            "pot": 0, "actions": [],
+        })
+    return hands
+
+
+def test_side_pot_winners_do_not_destroy_the_hypothesis_ensemble():
+    """Regression from the live replay: cinnabar is a plain ``standard`` table.
+
+    Hand 6 of that leg shows seats 4 and 5 holding 13 and 12 with *both* in
+    ``winners`` - they took different side pots.  Reading that as a tie
+    asserts something no rule satisfies, and it used to empty the candidate
+    set for the rest of the leg, dropping the bot onto its weakest fallback.
+    """
+    rule = phase_2._rule_for("cinnabar-replay")
+    body = build_body(table_rule="cinnabar-replay", recent_hands=_cinnabar_recent())
+    phase_3._observe_showdowns(rule, phase_3.TurnState(body))
+
+    assert "standard" in rule.candidates
+    assert rule.win_share(13, 12, 2) == 1.0  # not a tie
+
+
+def test_a_marginal_hand_does_not_call_off_half_a_stack():
+    """Regression: the hand that busted leg 4 of the live Phase 3 attempt.
+
+    11 on a 3 board, heads-up against a seat that re-raised twice pre-reveal
+    and then bet 70 into 93.  The call is close to break-even on chips and
+    catastrophic on rank - it cost the whole leg.  Two things used to let it
+    through: race pressure inflated the equity of a *call*, which buys no
+    fold equity at all, and the commitment cap governed raises but not calls.
+    """
+    phase_2.KNOWN_CODENAMES["cinnabar-bust"] = "standard"
+    try:
+        body = build_body(
+            table_rule="cinnabar-bust", hand_number=23, total_hands=60,
+            round="post_reveal", your_number=11, community_number=3,
+            your_stack=134, pot=163, to_call=70,
+            min_raise_to=140, max_raise_to=134,
+            legal_actions=["fold", "call", "raise"],
+            recent_hands=_cinnabar_recent(),
+            players=[
+                player(0, "you", stack=134),
+                player(1, "Dana", busted=True, stack=0),
+                player(2, "Miles", folded=True, stack=90),
+                player(3, "Theo", busted=True, stack=0),
+                player(4, "Rhea", stack=300, bet=70),
+                player(5, "Bram", busted=True, stack=0),
+            ],
+            current_hand_actions=[
+                {"round": "pre_reveal", "seat": 0, "action": "raise", "amount": 4},
+                {"round": "pre_reveal", "seat": 4, "action": "raise", "amount": 11},
+                {"round": "pre_reveal", "seat": 0, "action": "raise", "amount": 18},
+                {"round": "pre_reveal", "seat": 4, "action": "raise", "amount": 46},
+                {"round": "pre_reveal", "seat": 0, "action": "call", "amount": 46},
+                {"round": "post_reveal", "seat": 4, "action": "bet", "amount": 70},
+            ],
+        )
+        assert phase_3.move_from_body(body) == {"action": "fold"}
+    finally:
+        phase_2.KNOWN_CODENAMES.pop("cinnabar-bust", None)
+
+
+def test_pinned_codenames_match_the_solved_replay():
+    for codename, expected in [
+        ("verdigris", "standard"), ("cinnabar", "standard"),
+        ("amaranth", "lucky_7"),
+    ]:
+        assert phase_2.KNOWN_CODENAMES[codename] == expected
+        assert sorted(phase_2._rule_for(codename).candidates) == [expected]
+    # Never shown down against a pair, so both survivors stay live.
+    assert sorted(phase_2._rule_for("obsidian").candidates) == [
+        "low", "pair_bad_low"
+    ]

@@ -40,6 +40,16 @@ BLUFF_BASE = 0.55          # bluff below this fraction of our fair share
 EXPLORE_MIN_CONFIDENCE = 0.55
 EXPLORE_COMMIT_CAP = 10
 
+# Busting is a flat -200 and forfeits the leg outright, so a call that is
+# barely correct on chips can still be badly wrong on rank.  Demand extra
+# equity in proportion to the share of our stack the call puts at risk.
+CALL_RISK_SLOPE = 0.35
+
+# Before the reveal the board is unknown and equity is averaged over all 13
+# community numbers, so no holding is ever a big favourite.  Cap what a hand
+# may cost us until we have actually seen the community number.
+PRE_REVEAL_COMMIT = 0.25
+
 MAX_OPPONENTS = 32
 
 
@@ -159,9 +169,10 @@ def _shown_number(shown: dict, seat: int) -> Any:
 def _observe_showdowns(rule: phase_2.RuleModel, state: TurnState) -> None:
     """Turn a multiway result into every comparison the result proves.
 
-    Winners tie one another and beat every shown non-winner.  No ordering can
-    be inferred between two losing hands, so those pairs are intentionally
-    omitted.
+    A winner beats every shown non-winner.  Two winners holding the same
+    number tied; two winners holding different numbers split *side pots* and
+    prove nothing about each other.  No ordering can be inferred between two
+    losing hands either, so both kinds of pair are intentionally omitted.
     """
     match_key = state.match_id if isinstance(state.match_id, str) else "_default"
     for hand in phase_1._as_list(state.recent_hands):
@@ -196,6 +207,13 @@ def _observe_showdowns(rule: phase_2.RuleModel, state: TurnState) -> None:
                 right = _shown_number(shown, right_seat)
                 left_won, right_won = left_seat in winners, right_seat in winners
                 if left_won and right_won:
+                    if left != right:
+                        # ``winners`` merges every side pot, so two winners
+                        # holding different numbers did not tie - they took
+                        # different pots.  Recording it as a tie asserts
+                        # something no rule can satisfy, and one such hand
+                        # eliminates the entire hypothesis ensemble.
+                        continue
                     result = 0
                 elif left_won:
                     result = 1
@@ -239,11 +257,11 @@ def _infer_range(
     return weights
 
 
-#: Equity is averaged over surviving rule hypotheses.  Capping the count keeps
-#: the pre-reveal case (13 boards x N hypotheses x 32 call subsets) inside the
-#: 5 second reply budget; the cap only binds very early in a leg, where the
-#: exploration clamp is holding the pots small anyway.
-EQUITY_MAX_HYPOTHESES = 8
+#: Upper bound on hypotheses averaged into one equity number, purely as a
+#: latency guard.  It must stay above ``len(HYPOTHESES)``: truncating a sorted
+#: name list is not a neutral sample, it silently drops whole families (every
+#: ``lucky_*`` sorts before ``standard``), so the cap is set not to bind.
+EQUITY_MAX_HYPOTHESES = 64
 
 
 def _scenarios(rule: phase_2.RuleModel, community: int | None) -> list[tuple]:
@@ -489,10 +507,10 @@ def _commit_cap(
     stack_off = STACK_OFF_BASE if profile is None else profile.stack_off
     cap = EXPLORE_COMMIT_CAP if profile is None else profile.explore_cap
     if confidence < EXPLORE_MIN_CONFIDENCE:
-        return max(0, min(state.stack, cap))
+        return _apply_pre_reveal_cap(state, max(0, min(state.stack, cap)), profile)
     strategic_equity = min(1.0, equity + pressure)
     if strategic_equity >= _relative_floor(opponents, stack_off):
-        return state.stack
+        return _apply_pre_reveal_cap(state, state.stack, profile)
     if strategic_equity >= _relative_floor(opponents, 0.46):
         fraction = 0.68
     elif strategic_equity >= _relative_floor(opponents, 0.30):
@@ -500,7 +518,18 @@ def _commit_cap(
     else:
         fraction = 0.24
     budget = int(state.stack_at_hand_start * fraction) - state.committed_this_hand
-    return max(0, min(budget, state.stack))
+    return _apply_pre_reveal_cap(state, max(0, min(budget, state.stack)), profile)
+
+
+def _apply_pre_reveal_cap(
+    state: TurnState, budget: int, profile: "Profile | None"
+) -> int:
+    """Never play a whole stack off before the community number is known."""
+    if state.community in NUMBERS:
+        return budget
+    share = PRE_REVEAL_COMMIT if profile is None else profile.pre_reveal_commit
+    allowed = int(state.stack_at_hand_start * share) - state.committed_this_hand
+    return max(0, min(budget, allowed))
 
 
 def _sizing_menu(state: TurnState, max_add: int) -> list[int]:
@@ -627,6 +656,8 @@ class Profile:
     stack_off: float = STACK_OFF_BASE
     bluff: float = BLUFF_BASE
     explore_cap: int = EXPLORE_COMMIT_CAP
+    call_risk_slope: float = CALL_RISK_SLOPE
+    pre_reveal_commit: float = PRE_REVEAL_COMMIT
     max_bluff_opponents: int = 2
     pressure: Callable[["TurnState"], float] | None = None
     locked: Callable[["TurnState"], bool] | None = None
@@ -710,7 +741,11 @@ def decide(state: TurnState, profile: Profile = PHASE3) -> dict:
         return state.fallback()
 
     raw_call_ev = equity * (state.pot + state.to_call) - state.to_call
-    call_ev = strategic_equity * (state.pot + state.to_call) - state.to_call
+    # Race pressure buys fold equity, and a call has none: nobody folds to it.
+    # Adding it here made the bot call off *more* the further behind it was,
+    # which is precisely backwards - that is how a leg ends in a bust rather
+    # than in second place.  Pressure belongs on the betting thresholds below.
+    call_ev = raw_call_ev
     value = equity >= _relative_floor(live, profile.value_raise) - pressure
     if "raise" in state.legal and value and entries:
         best = _best_raise(state, rule, entries, max_add)
@@ -719,14 +754,28 @@ def decide(state: TurnState, profile: Profile = PHASE3) -> dict:
                 model.our_aggressive += 1
             return {"action": "raise", "amount": best[1]}
 
-    risk_premium = 0.015 * max(0, live - 1)
+    # A marginal call is not marginal when it is most of our stack.
+    risk_share = min(1.0, state.to_call / max(state.stack, 1))
+    risk_premium = (
+        0.015 * max(0, live - 1) + profile.call_risk_slope * risk_share
+    )
     thin_stack_off = (
         strategic_equity < _relative_floor(live, profile.stack_off)
         and state.stack > 0
         and state.to_call >= 0.9 * state.stack
         and state.hand_number < state.total_hands
     )
-    if call_ev > risk_premium * (state.pot + state.to_call) and not thin_stack_off:
+    # A call is a commitment like any other, so it answers to the same budget
+    # as a raise.  Without this the cap only ever restrained our own bets
+    # while an opponent could still charge us the whole stack one call at a
+    # time.  When equity really does justify stacking off, ``_commit_cap``
+    # returns the whole stack and this stops binding.
+    within_budget = state.to_call <= max_add
+    if (
+        call_ev > risk_premium * (state.pot + state.to_call)
+        and within_budget
+        and not thin_stack_off
+    ):
         if "call" in state.legal:
             return {"action": "call"}
     if "fold" in state.legal:

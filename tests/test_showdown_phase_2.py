@@ -173,14 +173,40 @@ def test_candidate_ensemble_identifies_standard_shape():
 
 def test_an_unrecognized_rule_falls_back_to_exact_empirical_comparisons():
     model = phase_2.RuleModel("strange")
-    # A deliberately irregular cycle eliminates every total-order hypothesis.
-    model.observe(4, 1, 2, 1)
-    model.observe(4, 2, 3, 1)
-    model.observe(4, 3, 1, 1)
+    # Deliberately irregular cycles eliminate every total-order hypothesis.
+    # One contradiction is absorbed as noise, so keep going until the model
+    # concedes that the rule is a shape we do not carry.
+    for community in range(4, 4 + phase_2.WIPEOUT_TOLERANCE):
+        model.observe(community, 1, 2, 1)
+        model.observe(community, 2, 3, 1)
+        model.observe(community, 3, 1, 1)
 
+    assert model.conflicts >= phase_2.WIPEOUT_TOLERANCE
     assert not model.candidates
     assert model.win_share(1, 2, 4) == 1.0
     assert model.win_share(2, 1, 4) == 0.0
+
+
+def test_one_contradiction_is_absorbed_rather_than_wiping_the_ensemble():
+    """A side pot read as a tie must not cost us the rule.
+
+    ``winners`` merges every side pot, so two winners can hold different
+    numbers.  Reading that as a tie asserts something no rule satisfies, and
+    before this guard a single such hand emptied the candidate set for the
+    rest of the leg - which is exactly what happened to ``cinnabar``, a plain
+    ``standard`` table.
+    """
+    model = phase_2.RuleModel("cinnabar-like")
+    truth = phase_2.HYPOTHESES["standard"]
+    for community, left, right in [(5, 9, 2), (11, 3, 7), (8, 8, 13)]:
+        model.observe(community, left, right, truth(left, right, community))
+    before = model.candidates
+    assert "standard" in before
+
+    model.observe(2, 13, 12, 0)  # impossible under every hypothesis
+
+    assert model.conflicts == 1
+    assert model.candidates == before
 
 
 def test_exact_lock_accounts_for_current_commitment_and_future_blinds():

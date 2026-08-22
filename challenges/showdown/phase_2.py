@@ -45,6 +45,11 @@ EXPLORE_MIN_CONFIDENCE = 0.58
 EXPLORE_CALL_CAP = 8
 EXPLORE_MAX_POT_FRACTION = 0.50
 
+#: Contradictions absorbed as noise before the ensemble is abandoned for the
+#: empirical ranking.  One is routine (a side pot read as a tie); several in
+#: the same match means the rule really is a shape we do not model.
+WIPEOUT_TOLERANCE = 3
+
 MAX_RULES = 64
 MAX_OPPONENTS = 32
 
@@ -134,6 +139,16 @@ def _key_under_community(number: int, community: int) -> tuple[int, int]:
     return (int(number <= community), number if number <= community else -number)
 
 
+def _lucky_key(lucky: int) -> Callable[[int, int], tuple]:
+    """One fixed number outranks everything; the rest is high card.
+
+    Observed live as ``amaranth``, where a 7 beat a pair.  The privileged
+    number is a property of the rule, not of the board, so the whole family
+    is enumerated rather than guessing which number is special.
+    """
+    return lambda number, community: (int(number == lucky), number)
+
+
 def _from_key(key: Callable[[int, int], tuple]) -> Compare:
     return lambda left, right, community: _cmp(
         key(left, community), key(right, community)
@@ -165,6 +180,10 @@ HYPOTHESES: dict[str, Compare] = {
     "under_community": _from_key(_key_under_community),
 }
 
+HYPOTHESES.update({
+    f"lucky_{lucky}": _from_key(_lucky_key(lucky)) for lucky in NUMBERS
+})
+
 
 #: ``RANKS[name][community][number]`` - the sort key, precomputed.  Every hot
 #: path compares two of these instead of re-invoking the hypothesis lambda.
@@ -183,6 +202,7 @@ def _build_rank_tables() -> None:
         "wrap_closest": _key_wrap_closest, "wrap_farthest": _key_wrap_farthest,
         "sum_high": _key_sum_high, "under_community": _key_under_community,
     }
+    keys.update({f"lucky_{lucky}": _lucky_key(lucky) for lucky in NUMBERS})
     for name, key in keys.items():
         RANKS[name] = tuple(
             None if board == 0 else tuple(
@@ -200,7 +220,16 @@ _build_rank_tables()
 #: attempt.  The mapping is fixed for the whole event, so pinning one here
 #: turns a 60-hand learning problem into knowledge from the first hand.  Read
 #: ``GET /showdown/rules`` after an attempt to fill this in.
-KNOWN_CODENAMES: dict[str, str] = {}
+KNOWN_CODENAMES: dict[str, str | list[str]] = {
+    # Solved from the Phase 3 replay at /matches/d41cc9d9-...  Every entry is
+    # consistent with 100% of that attempt's showdowns.
+    "verdigris": "standard",       # 41/41 constraints
+    "cinnabar": "standard",        # 40/40
+    "amaranth": "lucky_7",         # 30/30 - a 7 beats everything, even a pair
+    # 20/20 for both, and no pair was ever shown down, which is the only
+    # comparison that separates them.  Pin the pair, not a coin flip.
+    "obsidian": ["low", "pair_bad_low"],
+}
 
 
 @dataclass(frozen=True)
@@ -229,9 +258,15 @@ class RuleModel:
         if codename == "standard":
             self._candidates = {"standard"}
         known = KNOWN_CODENAMES.get(codename)
-        if known in HYPOTHESES:
-            self._candidates = {known}
-            self._pinned = True
+        if isinstance(known, str):
+            known = [known]
+        pinned = {name for name in (known or []) if name in HYPOTHESES}
+        if pinned:
+            # A codename may be narrowed to a couple of rules that no observed
+            # showdown has yet told apart - obsidian is `low` or `pair_bad_low`
+            # until a pair is shown down - so pin the set, not just one name.
+            self._candidates = pinned
+            self._pinned = len(pinned) == 1
 
     @property
     def candidates(self) -> frozenset[str]:
@@ -312,11 +347,24 @@ class RuleModel:
         self._exact[(community, right, left)] = -result
         observation = Observation(community, left, right, result)
         self.observations.append(observation)
-        self._candidates = {
+        survivors = {
             name
             for name in self._candidates
             if HYPOTHESES[name](left, right, community) == result
         }
+        # Multiway results are reconstructed from a `winners` list that merges
+        # side pots, so one mislabelled comparison is always possible, and a
+        # single one must not be able to wipe the ensemble: an empty candidate
+        # set costs the whole leg.  But the set must stay falsifiable - if the
+        # true rule genuinely is not one of ours, the empirical ranking is a
+        # better guide than a set of hypotheses we keep disproving.  So absorb
+        # the first few wipe-outs as noise, then concede.
+        if survivors:
+            self._candidates = survivors
+        elif self._candidates:
+            self.conflicts += 1
+            if self.conflicts >= WIPEOUT_TOLERANCE:
+                self._candidates = set()
 
         # Non-pair comparisons are also evidence for rules based on a global
         # permutation/grouping of the private numbers.
