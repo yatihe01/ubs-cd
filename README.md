@@ -14,6 +14,7 @@ package and is exposed through a Flask Blueprint.
 - `GET /showdown/rules` - what the bot has learned about each table-rule codename
 - `/mcp` - active Tool Box challenge MCP endpoint
 - `POST /kan-cheong-delivery-driver` - batch Kan Chiong Delivery Driver endpoint
+- `POST /stonks` - batch Time Travelling Stonks Man endpoint
 - `GET /ghost-chains/health`, `POST /ghost-chains/reset`,
   `POST /ghost-chains/transactions` - Ghost Chains risk scoring
 
