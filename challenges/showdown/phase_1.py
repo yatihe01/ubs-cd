@@ -636,6 +636,13 @@ def handle_move():
     if not isinstance(body, dict):
         return jsonify(action="fold")
 
+    # Keep the proven Phase 1 implementation intact while allowing the same
+    # registered endpoint to serve the multi-leg, learnable-rule phase.
+    if body.get("phase") == 2:
+        from challenges.showdown.phase_2 import move_from_body
+
+        return jsonify(move_from_body(body))
+
     legal = _legal_actions(body)
     try:
         state = TurnState(body)
