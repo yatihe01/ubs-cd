@@ -93,18 +93,18 @@ class GhostChainsModel:
         self.__init__()
 
     def process(self, transaction: Transaction) -> float:
-        previous = self._memo.get(transaction.tx_id)
+        previous = self.scores.get(transaction.tx_id)
         if previous is not None:
-            # Identical payload: return the original score, mutate nothing.
-            # Differing payload violates the "txId is unique" contract; returning
-            # the original score is the conservative choice - it keeps graph state
-            # consistent and never costs the rest of the batch its scores.
-            return previous
+            if previous[0] != transaction:
+                raise ValueError(
+                    f"txId {transaction.tx_id!r} was submitted with a different payload"
+                )
+            return previous[1]
 
         current_time = max(self.latest_time or transaction.created_at, transaction.created_at)
         cutoff = current_time - LOOKBACK
         active_transactions = [
-            item for item in self.transactions if item.created_at > cutoff
+            item for item in self.transactions if item.created_at >= cutoff
         ]
         expired = len(active_transactions) != len(self.transactions)
         active_ids = {item.tx_id for item in active_transactions}
@@ -116,12 +116,12 @@ class GhostChainsModel:
             self._rebuild_graph()
         score = self._score(transaction.from_user, transaction.to_user)
 
-        if transaction.created_at > cutoff:
+        if transaction.created_at >= cutoff:
             self.transactions.append(transaction)
             edge = (transaction.from_user, transaction.to_user)
             self.edge_counts[edge] += 1
             self.graph[transaction.from_user].add(transaction.to_user)
-        if transaction.created_at > cutoff:
+        if transaction.created_at >= cutoff:
             self.scores[transaction.tx_id] = (transaction, score)
         self.latest_time = current_time
         return score
