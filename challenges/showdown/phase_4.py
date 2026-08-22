@@ -18,9 +18,14 @@ identified here from the first hand.
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from threading import RLock
 from typing import Any
 
 from challenges.showdown import phase_1, phase_2, phase_3
+
+
+_ROUNDS_LOCK = RLock()
 
 
 NUMBERS = phase_3.NUMBERS
@@ -35,7 +40,24 @@ BLUFF_BASE = 0.50
 EXPLORE_COMMIT_CAP = 10
 
 #: Cushion, in chips, we want above the cut line before we stop taking risks.
-SAFE_MARGIN = 25
+#: A simulated sweep (14 games per setting, so weak evidence) showed 25 taking
+#: the occasional bust that 50 did not, at no cost to rank.  Busting is the one
+#: unrecoverable outcome here, so the tie breaks towards the wider cushion.
+SAFE_MARGIN = 50
+
+#: Rank ambition once survival is already comfortable.  Making the final table
+#: is the dominant term - an early cut pays 40-120 against 160 for last place
+#: there - so the early rounds are played for survival.  But the final table
+#: itself spreads 400 down to 160, and by then coasting is worth 240 fewer
+#: points than winning, so ambition is scaled up by rounds already survived.
+RANK_AMBITION_STEP = 0.045
+RANK_AMBITION_MAX = 0.12
+
+#: Bracket games seen by this process, oldest first.  The count is the best
+#: available proxy for how deep the bracket has run: the wire never says which
+#: round this is, or how much of the field is left.
+_ROUNDS: "OrderedDict[str, int]" = OrderedDict()
+MAX_TRACKED_ROUNDS = 64
 
 
 class TurnState(phase_3.TurnState):
@@ -44,27 +66,61 @@ class TurnState(phase_3.TurnState):
     def __init__(self, body: dict) -> None:
         super().__init__(body)
         self.total_hands = phase_1._as_int(body.get("total_hands"), 200) or 200
+        # "Player 3" at the first table and "Player 3" at the final table are
+        # different teams, so a read must not outlive the game it was taken in.
+        self.opponent_scope = (
+            self.match_id if isinstance(self.match_id, str) and self.match_id
+            else "_p4"
+        )
 
 
 def _live_deltas(state: TurnState) -> list[int]:
-    """Every active seat's delta, ours included, measured off live stacks.
+    """Every seat's delta, ours included, measured off live stacks.
+
+    Busted seats are included at a flat ``-starting_stack``: they are still
+    part of the table being cut, and they are guaranteed to be at the bottom
+    of it.  Counting only the survivors both shrinks the field the cut is
+    taken from and hides the seats already filling it, which reads as danger
+    at exactly the moment the danger has passed.
 
     ``chip_delta`` is frozen at the start of the hand, so mid-hand it lies
     about anyone who has already put chips in.  Stacks do not.
     """
     return [
         max(0, phase_1._as_int(player.get("stack"))) - state.starting_stack
-        for player in state.active_players
+        for player in state.players
     ]
 
 
 def _cut_line(state: TurnState) -> int:
-    """The highest delta that still gets cut.  Beat it and we go through."""
+    """The highest delta that still gets cut.  Beat it and we go through.
+
+    "Bottom third" is rounded to nearest rather than truncated: at seven seats
+    truncation claims two are cut and rounding up claims three, and neither
+    reading is given anywhere.  The nearest-integer split sits between them,
+    and ``SAFE_MARGIN`` covers the remaining seat of doubt.
+    """
     deltas = sorted(_live_deltas(state))
     if len(deltas) < 2:
         return -state.starting_stack
-    cut = max(1, len(deltas) // 3)
+    cut = max(1, round(len(deltas) / 3))
     return deltas[min(cut, len(deltas)) - 1]
+
+
+def _round_number(state: TurnState) -> int:
+    """How many bracket games this process has seen, this one included."""
+    key = state.match_id if isinstance(state.match_id, str) and state.match_id else "_p4"
+    with _ROUNDS_LOCK:
+        if key not in _ROUNDS:
+            _ROUNDS[key] = len(_ROUNDS) + 1
+            while len(_ROUNDS) > MAX_TRACKED_ROUNDS:
+                _ROUNDS.popitem(last=False)
+        return _ROUNDS[key]
+
+
+def reset_rounds() -> None:
+    with _ROUNDS_LOCK:
+        _ROUNDS.clear()
 
 
 def _our_delta(state: TurnState) -> int:
@@ -84,6 +140,39 @@ def _cut_pressure(state: TurnState) -> float:
     hands_left = max(1, state.total_hands - state.hand_number + 1)
     urgency = 1.0 - min(hands_left / max(state.total_hands, 1), 1.0)
     return min(0.24, deficit / max(state.starting_stack, 1) * urgency)
+
+
+def _rank_pressure(state: TurnState) -> float:
+    """Ambition to climb, but only from a position that can afford it.
+
+    Zero until survival is comfortable, zero once we already lead, and zero in
+    the closing hands where a lost race cannot be recovered.  In between it
+    grows with the round, because the deeper the bracket has run the more the
+    remaining points are decided by rank rather than by simply surviving.
+    """
+    ours, line = _our_delta(state), _cut_line(state)
+    if ours <= line + SAFE_MARGIN:
+        return 0.0
+    leader = max(
+        (
+            max(0, phase_1._as_int(player.get("stack"))) - state.starting_stack
+            for player in state.opponents
+        ),
+        default=ours,
+    )
+    if ours >= leader:
+        return 0.0
+    hands_left = max(0, state.total_hands - state.hand_number)
+    if hands_left <= max(4, len(state.active_players)):
+        return 0.0
+    ambition = min(RANK_AMBITION_MAX, RANK_AMBITION_STEP * _round_number(state))
+    gap = min(1.0, (leader - ours) / max(state.starting_stack, 1))
+    return ambition * gap
+
+
+def _pressure(state: TurnState) -> float:
+    """Survival first; ambition only from safety."""
+    return max(_cut_pressure(state), _rank_pressure(state))
 
 
 def _survival_locked(state: TurnState) -> bool:
@@ -110,7 +199,7 @@ PROFILE = phase_3.Profile(
     bluff=BLUFF_BASE,
     explore_cap=EXPLORE_COMMIT_CAP,
     max_bluff_opponents=2,
-    pressure=_cut_pressure,
+    pressure=_pressure,
     locked=_survival_locked,
 )
 
@@ -137,6 +226,7 @@ def move_from_body(body: dict) -> dict:
 
 def reset_models() -> None:
     phase_3.reset_models()
+    reset_rounds()
 
 
 # Rule knowledge is shared: the codename mapping is fixed for the whole event.

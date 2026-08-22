@@ -50,6 +50,10 @@ EXPLORE_MAX_POT_FRACTION = 0.50
 #: the same match means the rule really is a shape we do not model.
 WIPEOUT_TOLERANCE = 3
 
+#: Distinguishing comparisons required before a lone surviving hypothesis is
+#: promoted to a permanent codename mapping.
+AUTO_PIN_EVIDENCE = 14
+
 MAX_RULES = 64
 MAX_OPPONENTS = 32
 
@@ -361,6 +365,7 @@ class RuleModel:
         # the first few wipe-outs as noise, then concede.
         if survivors:
             self._candidates = survivors
+            self._maybe_pin()
         elif self._candidates:
             self.conflicts += 1
             if self.conflicts >= WIPEOUT_TOLERANCE:
@@ -394,6 +399,24 @@ class RuleModel:
         result = self._empirical_compare(left, right, community)
         reliability = min(len(self.observations) / 24.0, 0.72)
         return 0.5 + 0.5 * result * reliability
+
+    def _maybe_pin(self) -> None:
+        """Promote a well-evidenced single survivor to permanent knowledge.
+
+        Phase 4 has no retries and the codename mapping is fixed for the whole
+        event, so a rule identified in one bracket game should be known from
+        the first hand of the next.  The bar is deliberately high: one
+        surviving hypothesis proves nothing on its own, and a contradiction
+        anywhere in the history means something was misread.
+        """
+        if self._pinned or self.conflicts or len(self._candidates) != 1:
+            return
+        evidence = sum(item.left != item.right for item in self.observations)
+        if evidence < AUTO_PIN_EVIDENCE:
+            return
+        name = next(iter(self._candidates))
+        KNOWN_CODENAMES.setdefault(self.codename, name)
+        self._pinned = True
 
     def outcome_probs(
         self, left: int, right: int, community: int

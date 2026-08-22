@@ -49,6 +49,10 @@ EXPLORE_COMMIT_CAP = 10
 # equity in proportion to the share of our stack the call puts at risk.
 CALL_RISK_SLOPE = 0.35
 
+#: Width multiplier applied per additional raise the same seat makes in one
+#: hand, so a re-raise infers a tighter range than the open before it.
+AGGRESSION_NARROWING = 0.6
+
 # Before the reveal the board is unknown and equity is averaged over all 13
 # community numbers, so no holding is ever a big favourite.  Cap what a hand
 # may cost us until we have actually seen the community number.
@@ -96,6 +100,8 @@ class TurnState(phase_1.TurnState):
         super().__init__(body)
         rule = body.get("table_rule")
         self.table_rule = rule if isinstance(rule, str) and rule else "_unknown"
+        # Empty: Phase 3's cast is fixed, so reads persist across legs.
+        self.opponent_scope = ""
         self.leg_number = phase_1._as_int(body.get("leg_number"))
         self.total_legs = phase_1._as_int(body.get("total_legs"))
         self.button_seat = body.get("button_seat")
@@ -140,13 +146,22 @@ _PHASE3_SEEN: set[tuple[str, str, int, int]] = set()
 _STATE_LOCK = RLock()
 
 
-def _opponent_key(player: dict) -> str:
+def _opponent_key(player: dict, scope: str = "") -> str:
+    """Identity to accumulate a betting read against.
+
+    Phase 3 seats the same five personalities in every leg, so the name alone
+    is the right key and the read is worth carrying across legs.  Phase 4
+    anonymises seats as "Player 1", "Player 2", and reshuffles the field every
+    round, so the same label is a different team's bot each game - there the
+    key has to be scoped to the match or the reads blend into a field average.
+    """
     name = player.get("name")
-    return name if isinstance(name, str) and name else f"_seat_{player.get('seat')}"
+    base = name if isinstance(name, str) and name else f"_seat_{player.get('seat')}"
+    return f"{scope}\x00{base}" if scope else base
 
 
-def _opponent_for(player: dict) -> OpponentModel:
-    key = _opponent_key(player)
+def _opponent_for(player: dict, scope: str = "") -> OpponentModel:
+    key = _opponent_key(player, scope)
     with _STATE_LOCK:
         model = _OPPONENTS.get(key)
         if model is None:
@@ -237,13 +252,21 @@ def _infer_range(
     weights = {number: 1.0 for number in NUMBERS}
     open_width = min(max(model.aggression, 0.16), 0.82)
     seat = player.get("seat")
+    raises = 0
     for entry in state.hand_actions:
         if entry.get("seat") != seat:
             continue
         community = None if entry.get("round") == "pre_reveal" else state.community
         action = entry.get("action")
         if action in phase_1.AGGRESSIVE_ACTIONS:
-            keep, softness = open_width, 0.34
+            # Each further raise in the same hand says more than the one
+            # before it: an open is wide, a re-raise is not, and a third raise
+            # is close to the top of a range.  Holding the width constant made
+            # a four-bet look like an open, which priced our calls far too
+            # generously - it is what let 11-high call off half a stack.
+            keep = open_width * (AGGRESSION_NARROWING ** raises)
+            softness = 0.34
+            raises += 1
         elif action == "call":
             keep, softness = 0.82, 0.52
         else:
@@ -686,7 +709,7 @@ def decide(state: TurnState, profile: Profile = PHASE3) -> dict:
             _observe_showdowns(rule, state)
     with _STATE_LOCK:
         for player in state.opponents:
-            _opponent_for(player).observe(
+            _opponent_for(player, state.opponent_scope).observe(
                 state.recent_hands,
                 player.get("seat"),
                 state.match_id,
@@ -706,9 +729,14 @@ def decide(state: TurnState, profile: Profile = PHASE3) -> dict:
         return state.fallback()
 
     entries = [
-        (player, _opponent_for(player), _infer_range(
-            state, player, rule, _opponent_for(player)
-        ))
+        (
+            player,
+            _opponent_for(player, state.opponent_scope),
+            _infer_range(
+                state, player, rule,
+                _opponent_for(player, state.opponent_scope),
+            ),
+        )
         for player in state.live_opponents
     ]
     ranges = [weights for _, _, weights in entries]

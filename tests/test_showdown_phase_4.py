@@ -150,3 +150,92 @@ def test_known_codenames_are_trusted_from_the_first_hand(monkeypatch):
     rule = phase_2._rule_for("obsidian")
     assert sorted(rule.candidates) == ["parity_odd"]
     assert rule.confidence == 1.0
+
+
+def test_busted_seats_still_count_towards_the_cut():
+    """Seats already at zero fill the cut, and that makes survivors safer.
+
+    Counting only active seats both shrinks the field the bottom third is
+    taken from and hides the seats already filling it, so the bot read danger
+    at exactly the moment the danger had passed - and gambled accordingly.
+    """
+    players = (
+        [player(0, "you", stack=150)]
+        + [player(i, f"Player {i}", stack=0, busted=True) for i in (1, 2, 3)]
+        + [player(i, f"Player {i}", stack=350) for i in (4, 5, 6)]
+    )
+    state = phase_4.TurnState(build_body(
+        your_stack=150, hand_number=150, players=players,
+    ))
+    # Bottom two of seven are cut and three seats have already busted.
+    assert phase_4._cut_line(state) == -200
+    assert phase_4._our_delta(state) > phase_4._cut_line(state)
+    assert phase_4._cut_pressure(state) == 0.0
+
+
+def test_round_number_counts_distinct_bracket_games():
+    phase_4.reset_rounds()
+    first = phase_4.TurnState(build_body(match_id="table-a"))
+    second = phase_4.TurnState(build_body(match_id="table-b"))
+    assert phase_4._round_number(first) == 1
+    assert phase_4._round_number(second) == 2
+    assert phase_4._round_number(first) == 1  # stable, not a counter per call
+
+
+def _ranked_body(our_stack, leader_stack, **overrides):
+    players = [player(0, "you", stack=our_stack), player(1, "Player 1", stack=leader_stack)]
+    players += [player(i, f"Player {i}", stack=40) for i in range(2, 7)]
+    body = dict(your_stack=our_stack, hand_number=40, total_hands=200, players=players)
+    body.update(overrides)
+    return phase_4.TurnState(build_body(**body))
+
+
+def test_rank_ambition_is_zero_until_survival_is_comfortable():
+    phase_4.reset_rounds()
+    # Below the cut line: survival logic owns this region, not ambition.
+    short = _ranked_body(30, 400)
+    assert phase_4._rank_pressure(short) == 0.0
+    # Comfortably clear but behind the leader: now it is worth climbing.
+    safe = _ranked_body(260, 400)
+    assert phase_4._rank_pressure(safe) > 0.0
+    # Already leading: nothing to chase.
+    leading = _ranked_body(400, 260)
+    assert phase_4._rank_pressure(leading) == 0.0
+
+
+def test_rank_ambition_grows_with_rounds_survived():
+    """The deeper the bracket runs, the more the points ride on rank."""
+    phase_4.reset_rounds()
+    early = _ranked_body(260, 400, match_id="round-1")
+    first = phase_4._rank_pressure(early)
+    for index in range(2, 6):
+        phase_4._round_number(phase_4.TurnState(build_body(match_id=f"round-{index}")))
+    later = _ranked_body(260, 400, match_id="round-6")
+    assert phase_4._rank_pressure(later) > first
+    assert phase_4._rank_pressure(later) <= phase_4.RANK_AMBITION_MAX
+
+
+def test_rank_ambition_switches_off_in_the_closing_hands():
+    phase_4.reset_rounds()
+    late = _ranked_body(260, 400, hand_number=198, total_hands=200)
+    assert phase_4._rank_pressure(late) == 0.0
+
+
+def test_a_resolved_codename_is_pinned_for_the_next_bracket_game():
+    """Phase 4 has no retries, so a rule learned once must not be relearned."""
+    phase_2.KNOWN_CODENAMES.pop("fresh-codename", None)
+    try:
+        rule = phase_2._rule_for("fresh-codename")
+        truth = phase_2.HYPOTHESES["standard"]
+        rng = random.Random(4)
+        for _ in range(40):
+            community, left, right = (rng.randint(1, 13) for _ in range(3))
+            rule.observe(community, left, right, truth(left, right, community))
+
+        assert sorted(rule.candidates) == ["standard"]
+        assert phase_2.KNOWN_CODENAMES["fresh-codename"] == "standard"
+        # A fresh model for the same codename now starts from certainty.
+        phase_4.reset_models()
+        assert phase_2._rule_for("fresh-codename").confidence == 1.0
+    finally:
+        phase_2.KNOWN_CODENAMES.pop("fresh-codename", None)
