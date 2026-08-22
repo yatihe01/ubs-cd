@@ -50,13 +50,12 @@ class GhostChainsModel:
         cutoff = current_time - LOOKBACK
         self._expire(cutoff)
 
-        # The active window is strict: an event exactly 24 hours old, or a
-        # still older late arrival, cannot change the graph's structural signal.
-        if transaction.created_at > cutoff:
-            score = self._score(transaction.from_user, transaction.to_user)
+        # Every arriving transaction is scored against the active history. A
+        # late transaction older than the inclusive window is simply not
+        # admitted to future state.
+        score = self._score(transaction.from_user, transaction.to_user)
+        if transaction.created_at >= cutoff:
             self._admit(transaction)
-        else:
-            score = 0.0
         self.scores[transaction.tx_id] = (transaction, score)
         self.latest_time = current_time
         return score
@@ -72,7 +71,7 @@ class GhostChainsModel:
         self.graph[edge[0]].add(edge[1])
 
     def _expire(self, cutoff: datetime) -> None:
-        while self._active and self._active[0][0] <= cutoff:
+        while self._active and self._active[0][0] < cutoff:
             _, _, transaction = heapq.heappop(self._active)
             edge = (transaction.from_user, transaction.to_user)
             self._edge_counts[edge] -= 1

@@ -6,7 +6,7 @@ from challenges.adaptive_gateway.solution import calculate_slo, decode_payload, 
 
 @blueprint.route("/solve", methods=["POST"])
 def handle_solve():
-    body = request.get_json(silent=True)
+    body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
         return jsonify(error="request body must be a JSON object"), 400
 
