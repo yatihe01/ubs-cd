@@ -15,7 +15,9 @@ def handle_solve():
     except ValueError as exc:
         return jsonify(error=str(exc)), 400
 
-    response = {"adaptOutput": transform(decoded["adaptInput"])}
+    response = {}
+    if isinstance(decoded.get("adaptInput"), dict):
+        response["adaptOutput"] = transform(decoded["adaptInput"])
     if "heartbeats" in decoded or "sloQuery" in decoded:
         response["sloOutput"] = calculate_slo(
             decoded.get("heartbeats"), decoded.get("sloQuery")
