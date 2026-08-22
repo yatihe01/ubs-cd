@@ -68,6 +68,50 @@ def test_restored_372_window_excludes_exact_boundary():
     assert [item.tx_id for item in model.transactions] == ["ba"]
 
 
+def test_stale_late_arrival_has_zero_score_and_does_not_enter_state():
+    model = GhostChainsModel()
+    model.process(
+        transaction(
+            "future",
+            "A",
+            "B",
+            created_at=BASE_TIME + timedelta(hours=48),
+        )
+    )
+
+    score = model.process(
+        transaction("stale", "B", "A", created_at=BASE_TIME)
+    )
+
+    assert score == 0.0
+    assert [item.tx_id for item in model.transactions] == ["future"]
+
+
+def test_expiring_one_parallel_transaction_keeps_edge_active():
+    model = GhostChainsModel()
+    model.process(transaction("ab-old", "A", "B", created_at=BASE_TIME))
+    model.process(
+        transaction(
+            "ab-fresh",
+            "A",
+            "B",
+            created_at=BASE_TIME + timedelta(hours=1),
+        )
+    )
+
+    score = model.process(
+        transaction(
+            "ba",
+            "B",
+            "A",
+            created_at=BASE_TIME + timedelta(hours=24, minutes=30),
+        )
+    )
+
+    assert score == 0.38
+    assert [item.tx_id for item in model.transactions] == ["ab-fresh", "ba"]
+
+
 def test_duplicate_transaction_is_idempotent():
     model = GhostChainsModel()
     original = transaction("same", "A", "B", created_at=BASE_TIME)
