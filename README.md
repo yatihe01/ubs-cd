@@ -9,6 +9,10 @@ package and is exposed through a Flask Blueprint.
 - `GET /health` - Render health check
 - `POST /solve` - alias for the currently active challenge
 - `POST /adaptive-gateway/solve` - permanent Adaptive API Gateway endpoint
+- `/tool-box/mcp` - Tool Box challenge MCP endpoint
+
+For Tool Box, submit `https://<host>/tool-box` as the team URL. The evaluator
+appends `/mcp` when discovering the server.
 
 ## Local setup
 
@@ -35,4 +39,5 @@ pytest
 5. Work on a `challenge/<challenge-name>` branch and open a pull request into
    `main`.
 
-Render deploys `main` using `gunicorn app:app`.
+Render deploys `main` using Uvicorn because the service now hosts both the
+Tool Box ASGI MCP application and the existing Flask application.
