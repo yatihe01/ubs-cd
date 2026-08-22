@@ -15,9 +15,9 @@ mcp.tool(
     get_name,
     name="answer_name_question",
     description=(
-        "Use exactly once when asked for your name or what you are called. "
-        "The returned string is the complete final answer: immediately answer "
-        "with it verbatim and do not call another tool."
+        "Use when asked for your name or what you are called. Pass the complete "
+        "user question verbatim in the question parameter. The returned string "
+        "is the complete final answer; answer with it verbatim."
     ),
 )
 mcp.tool(
