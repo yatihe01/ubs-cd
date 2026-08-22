@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -20,10 +21,20 @@ class Transaction:
 
 class GhostChainsModel:
     def __init__(self) -> None:
-        self.transactions: list[Transaction] = []
+        self._active: list[tuple[datetime, int, Transaction]] = []
+        self._sequence = 0
+        self._edge_counts: defaultdict[tuple[str, str], int] = defaultdict(int)
         self.graph: defaultdict[str, set[str]] = defaultdict(set)
         self.scores: dict[str, tuple[Transaction, float]] = {}
         self.latest_time: datetime | None = None
+
+    @property
+    def transactions(self) -> list[Transaction]:
+        """Active transactions in arrival order, retained for diagnostics."""
+        return [
+            transaction
+            for _, _, transaction in sorted(self._active, key=lambda item: item[1])
+        ]
 
     def reset(self) -> None:
         self.__init__()
@@ -37,22 +48,43 @@ class GhostChainsModel:
 
         current_time = max(self.latest_time or transaction.created_at, transaction.created_at)
         cutoff = current_time - LOOKBACK
-        self.transactions = [
-            item for item in self.transactions if item.created_at > cutoff
-        ]
-        self._rebuild_graph()
-        score = self._score(transaction.from_user, transaction.to_user)
+        self._expire(cutoff)
 
+        # The active window is strict: an event exactly 24 hours old, or a
+        # still older late arrival, cannot change the graph's structural signal.
         if transaction.created_at > cutoff:
-            self.transactions.append(transaction)
+            score = self._score(transaction.from_user, transaction.to_user)
+            self._admit(transaction)
+        else:
+            score = 0.0
         self.scores[transaction.tx_id] = (transaction, score)
         self.latest_time = current_time
         return score
 
-    def _rebuild_graph(self) -> None:
-        self.graph = defaultdict(set)
-        for transaction in self.transactions:
-            self.graph[transaction.from_user].add(transaction.to_user)
+    def _admit(self, transaction: Transaction) -> None:
+        heapq.heappush(
+            self._active,
+            (transaction.created_at, self._sequence, transaction),
+        )
+        self._sequence += 1
+        edge = (transaction.from_user, transaction.to_user)
+        self._edge_counts[edge] += 1
+        self.graph[edge[0]].add(edge[1])
+
+    def _expire(self, cutoff: datetime) -> None:
+        while self._active and self._active[0][0] <= cutoff:
+            _, _, transaction = heapq.heappop(self._active)
+            edge = (transaction.from_user, transaction.to_user)
+            self._edge_counts[edge] -= 1
+            if self._edge_counts[edge] > 0:
+                continue
+            del self._edge_counts[edge]
+            neighbours = self.graph.get(edge[0])
+            if neighbours is None:
+                continue
+            neighbours.discard(edge[1])
+            if not neighbours:
+                del self.graph[edge[0]]
 
     def _score(self, source: str, target: str) -> float:
         return_paths = _path_count(self.graph, target, source)
