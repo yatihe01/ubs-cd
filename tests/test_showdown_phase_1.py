@@ -226,6 +226,25 @@ def test_health_is_answered(client):
     assert response.get_json() == {"status": "ok"}
 
 
+@pytest.mark.parametrize("endpoint", ["/move", "/showdown/move"])
+def test_move_is_served_at_both_base_urls(client, endpoint):
+    """A base URL of <host> and one of <host>/showdown must both play.
+
+    Getting this wrong forfeits the match without looking broken: the root
+    health check answers 200 either way, so the bot passes the warm-up and then
+    has every single move substituted.
+    """
+    response = client.post(endpoint, json=build_body())
+
+    assert response.status_code == 200
+    assert response.get_json()["action"] in build_body()["legal_actions"]
+
+
+@pytest.mark.parametrize("endpoint", ["/health", "/showdown/health"])
+def test_both_health_probes_answer(client, endpoint):
+    assert client.get(endpoint).status_code == 200
+
+
 def test_fuzzed_requests_never_produce_an_illegal_move(client):
     """Protocol-shaped noise: the reply must always be one they offered."""
     rng = random.Random(20260822)

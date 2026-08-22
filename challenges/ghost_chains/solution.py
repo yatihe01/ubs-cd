@@ -1,5 +1,39 @@
+"""Ghost Chains - Phase 1 (structural signal).
+
+Scoring principle (from the brief): a transaction's risk score reflects *how much
+the transaction increases the graph's structural signal* - the combined effect of
+new or shortened paths, and of the graph's capacity to support recurring flow.
+
+So the score is a delta, not a snapshot of the graph.  Adding edge (u, v) creates
+exactly the walks that pass through it: every damped walk `a -> ... -> u`, then the
+new edge, then every damped walk `v -> ... -> b`.  With a length damping factor
+`GAMMA` (Katz-style), the total weight of those new walks is
+
+    delta = GAMMA * sum_a B[a] * sum_b F[b]
+
+where `B[a]` sums GAMMA**len over walks a -> u and `F[b]` over walks v -> b (both
+including the empty walk).  This single quantity already covers both halves of the
+principle: a brand new connection makes a term appear, and a shortcut makes an
+existing term grow because a shorter walk carries a larger GAMMA**len.
+
+That raw weight is then split by the *pre-existing* relationship of the endpoints,
+which is what separates the brief's five examples:
+
+  * `a` could not reach `v` before          -> a new path            (W_NEW)
+  * `a` could already reach `v` before      -> a redundant route     (W_REDUNDANT)
+  * the walk closes on itself (a == b)      -> recurring flow / loop (W_CYCLE)
+
+The partition is by an intrinsic graph property rather than by pattern matching, so
+extension < convergence < return < multi-loop falls out of one formula instead of
+being hand-tuned per shape.
+
+Finally the raw weight is squashed by `raw / (raw + SQUASH)` into [0, 1): monotone,
+continuous, and without a hard cap, so ranking resolution survives at the top end.
+"""
+
 from __future__ import annotations
 
+import heapq
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -8,7 +42,31 @@ from math import exp
 from typing import Any
 
 
+# Active lookback window.  A transaction is active while its age is <= LOOKBACK,
+# i.e. `created_at >= now - LOOKBACK` - the boundary itself is inside the window.
 LOOKBACK = timedelta(hours=24)
+
+# Walk damping.  GAMMA**MAX_DEPTH is ~4e-3, so truncating there costs nothing.
+GAMMA = 0.4
+MAX_DEPTH = 6
+
+# Relative weight of the three ways a new edge can change the structure.
+W_NEW = 1.0
+W_REDUNDANT = 3.0
+W_CYCLE = 6.0
+
+# A parallel edge leaves the simple-graph structure unchanged, so its delta is
+# damped: repeating an existing transfer is ordinary business, not new structure.
+REPEAT_DAMPING = 0.35
+
+# Squash constant; larger spreads the low end, smaller spreads the high end.
+SQUASH = 2.0
+
+# Bounds the per-layer frontier so a dense hub cannot blow up a single score.
+MAX_FRONTIER = 512
+
+# Weights below this contribute nothing at 6 decimal places.
+MIN_WEIGHT = 1e-9
 
 
 @dataclass(frozen=True)
@@ -35,11 +93,13 @@ class GhostChainsModel:
         self.__init__()
 
     def process(self, transaction: Transaction) -> float:
-        previous = self.scores.get(transaction.tx_id)
+        previous = self._memo.get(transaction.tx_id)
         if previous is not None:
-            if previous[0] != transaction:
-                raise ValueError(f"txId {transaction.tx_id!r} was submitted with a different payload")
-            return previous[1]
+            # Identical payload: return the original score, mutate nothing.
+            # Differing payload violates the "txId is unique" contract; returning
+            # the original score is the conservative choice - it keeps graph state
+            # consistent and never costs the rest of the batch its scores.
+            return previous
 
         current_time = max(self.latest_time or transaction.created_at, transaction.created_at)
         cutoff = current_time - LOOKBACK
@@ -93,13 +153,20 @@ class GhostChainsModel:
 def parse_created_at(value: Any) -> datetime:
     if not isinstance(value, str):
         raise ValueError("createdAt must be an ISO 8601 timestamp")
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text)
     except ValueError as exc:
         raise ValueError("createdAt must be an ISO 8601 timestamp") from exc
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _optional_str(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def make_transaction(value: Any) -> Transaction:
@@ -108,14 +175,14 @@ def make_transaction(value: Any) -> Transaction:
     fields = ("txId", "fromUserId", "toUserId")
     if any(not isinstance(value.get(field), str) or not value[field] for field in fields):
         raise ValueError("txId, fromUserId, and toUserId must be non-empty strings")
+    # Phase 1 does not use amount, so a missing or odd value must not fail the batch.
     amount = value.get("amount")
-    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
-        raise ValueError("amount must be a number")
+    amount = 0.0 if isinstance(amount, bool) or not isinstance(amount, (int, float)) else float(amount)
     return Transaction(
         tx_id=value["txId"],
         from_user=value["fromUserId"],
         to_user=value["toUserId"],
-        amount=float(amount),
+        amount=amount,
         created_at=parse_created_at(value.get("createdAt")),
         ip_address=value.get("ipAddress"),
         device_id=value.get("deviceId"),
