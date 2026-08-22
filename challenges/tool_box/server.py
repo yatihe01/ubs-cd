@@ -1,7 +1,9 @@
-"""MCP registration for Stage 1 of the Tool Box challenge."""
+"""MCP registration for the Tool Box challenge."""
 
 from fastmcp import FastMCP
 
+from challenges.tool_box.routing import choose_next_node
+from challenges.tool_box.study_retrieval import retrieve_study_passages
 from challenges.tool_box.tools import (
     calculate,
     evaluate_expression,
@@ -10,7 +12,7 @@ from challenges.tool_box.tools import (
 )
 
 
-mcp = FastMCP("Tool Box — Stage 1")
+mcp = FastMCP("Tool Box")
 mcp.tool(
     get_name,
     name="answer_name_question",
@@ -37,6 +39,24 @@ mcp.tool(
     ),
 )
 mcp.tool(recognize_shape)
+mcp.tool(
+    retrieve_study_passages,
+    description=(
+        "Use for School Days factual-recall questions and for finding the STOP_XX "
+        "node associated with a named school-trip place. Pass the complete question "
+        "once and answer from the returned source passages; the passages are evidence, "
+        "not a prewritten final answer."
+    ),
+)
+mcp.tool(
+    choose_next_node,
+    description=(
+        "Use at every step of a School Days journey. Pass the exact map_id, current "
+        "node, destination node, and the question's current hops_remaining value (or "
+        "null when none is specified). Returns one adjacent next node on the cheapest "
+        "directed route, counting edge weights plus the toll of every entered node."
+    ),
+)
 
 
 # The parent application mounts this ASGI app at the evaluator's root /mcp.
