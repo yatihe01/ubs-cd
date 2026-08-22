@@ -61,8 +61,8 @@ def test_agent_sees_purpose_specific_tool_schemas():
         "evaluate_expression",
         "calculate",
         "recognize_shape",
-        "retrieve_study_passages",
         "choose_next_node",
+        "retrieve_study_passages",
     ]
     assert "complete final answer" in tools["answer_name_question"].description
     assert tools["answer_name_question"].parameters["required"] == ["question"]
@@ -77,6 +77,10 @@ def test_agent_sees_purpose_specific_tool_schemas():
         "current_node",
         "destination",
     ]
+    assert "MANDATORY" in tools["choose_next_node"].description
+    assert "containing map_id" in tools["choose_next_node"].description
+    assert "Call immediately" in tools["choose_next_node"].description
+    assert "repeat until destination" in tools["choose_next_node"].description
 
 
 @pytest.mark.parametrize(
