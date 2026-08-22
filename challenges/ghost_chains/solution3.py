@@ -28,39 +28,54 @@ same damped backward-walk weight the structural score already computed for that
 node - so a distant, weakly-connected predecessor cannot swamp a close one, and
 the weighting vocabulary stays identical to Phase 2's.
 
-Turning a ratio into a score:
+Value evidence is SIGNED, which is the one genuinely new idea in this phase.
+Phases 1 and 2 could only add risk, with a hard floor at zero, so every explicable
+transaction piled up on that floor and the model had no way to say "this one is
+accounted for".  The brief forces the other direction: it puts Example 1 - a
+textbook layering decay - *below* three shapes that look tamer, which only makes
+sense if the reference scores deviation from an inferred flow rather than
+conformance to it.  So:
 
-  * ratio in [DECAY_FLOOR, 1.0]  -  a step that keeps some-to-all of the prior
-    amount.  This is layering's signature move (Example 1), not a deviation from
-    it, so it contributes exactly 0.  This also means a stream of uniform amounts
-    (ratio == 1.0 everywhere, as every Phase 1/2 fixture uses) scores identically
-    whether or not Phase 3 is switched on.
-  * ratio < DECAY_FLOOR  -  most of the value did not continue onto this leg.
-    Plausible (fees, partial forwarding) but no longer "the same money", so it
-    contributes a small, capped amount of signal - much less than a reversal.
-  * ratio > 1.0  -  the amount *grew* across a hop that structurally continues a
-    path.  This is Example 3's "value trajectory reversal": the expected
-    degradation pattern is violated while the path stays intact, which the brief
-    calls out as the strongest of the four value examples, so it is scored on a
-    much steeper curve than a shortfall and saturates fast (REVERSAL_SCALE).
+  * a tight, strictly decaying trail CORROBORATES the flow hypothesis.  The money
+    is accounted for, and the score is pulled below what the shape alone earns.
+  * a ratio of exactly 1.0 is not decay, it is an absence of value information,
+    and stays neutral.  This is what keeps a uniform-amount stream - every Phase
+    1/2 fixture - bit-for-bit identical to Phase 2.
+  * an incoherent trail (hops that do not describe one movement of value)
+    CONTRADICTS it mildly.
+  * ratio > 1.0 CONTRADICTS it directly: the amount grew across a hop that
+    structurally continues a path.  This is Example 3's "value trajectory
+    reversal", and it is weighted heavily enough to lift a plain extension past a
+    convergence, because the brief requires exactly that (Example 3 carries ~37%
+    of Example 4's structural weight yet has to outrank it).
 
-Composition with the other two signals follows Phase 2's own pattern exactly:
-identity and value are both flow-relative multipliers on the structural weight,
-combined additively inside one multiplier so they read as one system rather than
-three scores glued together -
+Composition is asymmetric, because confirming and disconfirming evidence are not
+mirror images:
 
-    raw = structural * (1 + IDENTITY_GAIN * align + VALUE_GAIN * value_align)
-          + CROSS_GAIN * standalone
+    modifier = (1 + IDENTITY_GAIN * align) * (1 + value_mod)   if value_mod >= 0
+             = (1 + IDENTITY_GAIN * align) + value_mod         if value_mod <  0
 
-Because Examples 1 and 3 in the brief use the *identical* graph shape (the same
-five-node linear chain, same edges, only the amounts differ), their structural
-and identity terms are exactly equal - the entire required ordering between them
-is carried by `value_align` alone. With decay scoring exactly 0 and any reversal
-scoring strictly above 0, Example 3 > Example 1 holds by construction, not by
-tuning against the specific numbers in the brief.
+    raw = structural * modifier + CROSS_GAIN * standalone
 
-With every amount on the stream identical (or with no predecessor edge anywhere),
-`value_align` is 0.0 everywhere and the score is bit-for-bit the Phase 2 score.
+Contradiction MULTIPLIES, so a transaction that is structurally a return path AND
+carries a broken identity AND grew its amount is a different order of suspicious
+than any one of those alone - the brief's "unified system rather than evaluated in
+isolation", with CROSS_SIGNAL_DEVIATION as its own diagnostic category.  Summing
+would make three moderate signals merely a moderate total.
+
+Corroboration only SUBTRACTS.  It is a claim about the value dimension's own
+hypothesis and cannot explain away an identity anomaly; scaling both together
+would be actively harmful, since a professional layering operation produces clean
+geometric decay by design, and damping its common-control evidence in proportion
+to how tidy its amounts look would suppress precisely the cases worth catching.
+
+Examples 1 and 3 use the *identical* graph shape (same five-node chain, same
+edges, only the amounts differ), so their structural and identity terms are equal
+and the entire required ordering between them is carried by `value_mod` alone -
+by construction rather than by tuning against the brief's specific numbers.
+
+With every amount on the stream identical, or with no predecessor edge anywhere,
+`value_mod` is 0.0 and the score is bit-for-bit the Phase 2 score.
 """
 
 from __future__ import annotations
@@ -121,35 +136,45 @@ CROSS_SCAN_CAP = 512
 
 # ----- Phase 3 constants -----------------------------------------------------------
 
-# Spread of retention ratios along one segment at which inconsistency saturates.
-# A segment whose hops retain 99.1%, 99.1%, 99.1% has spread ~0 (Example 1); one
-# that halves and then retains 98% has spread ~0.48 (Examples 2 and 4).
+# Value evidence is SIGNED.  Phases 1 and 2 could only ever add risk, with a hard
+# floor at zero, so every explicable transaction piled up on that floor and the
+# model had no way to say "this one is accounted for".  Phase 3 needs the other
+# direction: the brief puts Example 1 - a textbook layering decay - *below* three
+# shapes that look tamer, which only makes sense if the reference scores deviation
+# from an inferred flow rather than conformance to it.  A trail that behaves
+# exactly as the flow hypothesis predicts corroborates the ordinary explanation
+# and pulls the score down; a trail that contradicts it pushes the score up.
+
+# A hop must retain at least this much of the previous leg to read as layering
+# decay at all.  Below it the money largely left the flow, so the trail no longer
+# describes one coherent movement of value and cannot corroborate anything.
+RETENTION_FLOOR = 0.6
+
+# Spread of retention ratios at which a trail stops looking like one flow.  A
+# segment retaining 99.1%, 99.1%, 99.1% has spread ~0 (Example 1); one that halves
+# and then retains 98% has spread ~0.48 (Examples 2 and 4).
 SPREAD_SCALE = 0.5
 
-# Weight of segment inconsistency as a multiplicative term.  Deliberately small:
-# an incoherent value trail is real evidence but nothing like a reversal, and it
-# must not let a long ordinary chain overtake a genuine structural signal.
-W_INCONSISTENT = 0.15
+# Corroboration: a tight, strictly decaying trail multiplies the structural weight
+# by (1 - W_CORROBORATE), so a fully coherent flow scores at 40% of what its shape
+# alone would earn.  Flat amounts are NOT corroborating - a ratio of exactly 1.0
+# is not decay, it is an absence of value information - which is what keeps a
+# uniform-amount stream bit-identical to Phase 2.
+W_CORROBORATE = 0.6
 
-# A ratio above 1.0 is a value trajectory reversal.  *Any* growth against a
-# continuing path already contradicts the expected degradation pattern, so the
-# term starts at REVERSAL_BASE the moment the ratio crosses 1.0 and climbs to 1.0
-# over REVERSAL_SCALE of further growth rather than ramping up from nothing.
-REVERSAL_BASE = 0.6
+# Contradiction, mild: the trail is neither coherent decay nor a reversal.  Real
+# evidence, but nothing like a reversal.
+W_INCOHERENT = 0.25
+
+# Contradiction, direct: the amount grew across a hop that structurally continues
+# a path.  *Any* growth already contradicts the expected degradation, so the term
+# starts at REVERSAL_BASE the moment the ratio crosses 1.0 and ramps by
+# REVERSAL_RAMP over REVERSAL_SCALE of further growth.  It is large because it
+# must be able to lift a plain extension past a convergence: the brief's Example 3
+# carries ~37% of Example 4's structural weight yet has to outrank it.
+REVERSAL_BASE = 3.0
+REVERSAL_RAMP = 1.0
 REVERSAL_SCALE = 0.1
-
-# How hard value inconsistency amplifies the structural weight.  Same role and
-# order of magnitude as IDENTITY_GAIN, so neither signal dominates by construction.
-VALUE_GAIN = 1.5
-
-# A reversal enters ADDITIVELY rather than as a multiplier on the structural
-# weight.  The brief calls a reversal "a direct contradiction" of the layering
-# pattern - evidence in its own right, not a modifier on how much structure the
-# edge happens to join.  Multiplicatively it could never outrank a shape with
-# several times the structural weight (Example 4 carries ~2.7x Example 3's), yet
-# the brief requires exactly that ordering.  It is still gated on there being an
-# inferred flow to contradict: with no predecessor edge the term is 0.
-REVERSAL_WEIGHT = 2.0
 
 # Longest inferred value segment walked back from the sender.
 MAX_TRAIL = 6
@@ -302,18 +327,42 @@ class GhostChainsModel:
 
         structural = self._structural_raw(source, target, backward, forward)
         align, standalone = self._identity_raw(transaction, backward, forward)
-        inconsistency, reversal = self._value_raw(transaction, source, backward)
+        value_mod = self._value_raw(transaction, source, backward)
 
-        # Identity agreement and value incoherence both amplify the structural
-        # weight, inside one multiplier, so the three signals read as one system.
-        # A value reversal and identity reuse across disconnected components enter
-        # additively instead: neither is a modifier on how much structure this edge
-        # joins, both are evidence in their own right.
-        raw = (
-            structural * (1.0 + IDENTITY_GAIN * align + VALUE_GAIN * inconsistency)
-            + REVERSAL_WEIGHT * reversal
-            + CROSS_GAIN * standalone
-        )
+        # Contradicting evidence compounds; corroborating evidence only offsets.
+        #
+        # When the value trail contradicts the flow, the two dimensions MULTIPLY:
+        # summing them would make a transaction carrying a return path AND a
+        # broken identity AND a grown amount merely the sum of three moderate
+        # terms, when the brief is explicit that such a case is a different order
+        # of suspicious - "a unified system rather than evaluated in isolation",
+        # with CROSS_SIGNAL_DEVIATION as its own diagnostic category.
+        #
+        # When the trail corroborates the flow it is only SUBTRACTED, never used
+        # to scale identity down.  Corroboration is evidence about the value
+        # dimension's own hypothesis - it says the amounts are accounted for - and
+        # it cannot explain away an identity anomaly, which is a different kind of
+        # claim.  Scaling both together would be actively harmful here: a
+        # professional layering operation produces clean geometric decay *by
+        # design*, so damping its common-control evidence in proportion to how
+        # tidy its amounts look would suppress precisely the cases worth catching.
+        # Treating disconfirming evidence as more informative than confirming
+        # evidence is the standard asymmetry, not a tuning choice.
+        #
+        # With a uniform-amount stream `value_mod` is 0 and both branches collapse
+        # to exactly Phase 2's `1 + IDENTITY_GAIN * align`.
+        identity_factor = 1.0 + IDENTITY_GAIN * align
+        if value_mod >= 0.0:
+            modifier = identity_factor * (1.0 + value_mod)
+        else:
+            # Floored at zero; W_CORROBORATE < 1 <= identity_factor already keeps
+            # this positive, and the clamp makes that hold whatever constants say.
+            modifier = max(0.0, identity_factor + value_mod)
+
+        # Identity reuse across disconnected components is the one term that stays
+        # additive: there is no structure for it to amplify, which is exactly why
+        # the brief calls it a coordination hint rather than proof.
+        raw = structural * modifier + CROSS_GAIN * standalone
 
         return round(raw / (raw + SQUASH), 6)
 
@@ -484,9 +533,14 @@ class GhostChainsModel:
         transaction: Transaction,
         source: str,
         backward: dict[str, float],
-    ) -> tuple[float, float]:
-        """Return `(inconsistency, reversal)` from the amount trail of the single
+    ) -> float:
+        """Return the signed value modifier from the amount trail of the single
         inferred flow segment this transaction extends.
+
+        Negative when the trail corroborates the flow hypothesis (a tight,
+        strictly decaying progression), positive when it contradicts it (an
+        incoherent trail, or an outright reversal), zero when there is nothing
+        to judge.
 
         The segment is built by walking backward from `source` along the strongest
         predecessor edge at each step (strongest by the same damped backward-walk
@@ -495,14 +549,14 @@ class GhostChainsModel:
         segmentation".  Two branches out of a common ancestor therefore each see
         only their own trail, and two branches converging on one node likewise.
 
-        Both terms are 0.0 when `source` has no active predecessor edge: a single
-        amount means nothing alone.  `inconsistency` additionally needs two ratios
-        to compare, and a trail of identical amounts has zero spread, so a uniform
-        stream reproduces Phase 2 exactly.
+        0.0 when `source` has no active predecessor edge: a single amount means
+        nothing alone.  Judging *coherence* needs at least two ratios to compare,
+        and a flat trail is an absence of value information rather than decay, so
+        a uniform-amount stream reproduces Phase 2 exactly.
         """
         trail = self._amount_trail(source, backward)
         if not trail:
-            return 0.0, 0.0
+            return 0.0
 
         trail.append(transaction.amount)
         ratios = [
@@ -511,23 +565,29 @@ class GhostChainsModel:
             if trail[i] > 0.0
         ]
         if not ratios:
-            return 0.0, 0.0
+            return 0.0
 
+        # A reversal is judged on the hop being scored, so it needs no history
+        # beyond the one leg that fed it.
         last = ratios[-1]
         if last > 1.0:
-            reversal = REVERSAL_BASE + (1.0 - REVERSAL_BASE) * min(
+            return REVERSAL_BASE + REVERSAL_RAMP * min(
                 1.0, (last - 1.0) / REVERSAL_SCALE
             )
-        else:
-            reversal = 0.0
 
-        if len(ratios) >= 2:
-            spread = max(ratios) - min(ratios)
-            inconsistency = W_INCONSISTENT * min(1.0, spread / SPREAD_SCALE)
-        else:
-            inconsistency = 0.0
+        # Coherence is a property of the trail, so it is undefined on a single hop.
+        if len(ratios) < 2:
+            return 0.0
 
-        return inconsistency, reversal
+        spread = max(ratios) - min(ratios)
+        if all(RETENTION_FLOOR <= ratio < 1.0 for ratio in ratios):
+            # Every hop kept most, but not all, of the prior amount: the flow
+            # hypothesis explains the money.  The tighter the progression, the
+            # more it corroborates.
+            coherence = 1.0 - min(1.0, spread / SPREAD_SCALE)
+            return -W_CORROBORATE * coherence
+
+        return W_INCOHERENT * min(1.0, spread / SPREAD_SCALE)
 
     def _amount_trail(self, source: str, backward: dict[str, float]) -> list[float]:
         """Amounts along the strongest inferred path ending at `source`, oldest

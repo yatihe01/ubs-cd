@@ -15,6 +15,7 @@ from challenges.ghost_chains.solution2 import make_transaction as phase_two_tran
 from challenges.ghost_chains.solution3 import (
     GhostChainsModel,
     LOOKBACK,
+    W_CORROBORATE,
     make_transaction,
 )
 
@@ -192,11 +193,33 @@ def test_value_reversal_is_the_highest_of_the_four():
     assert reversal > last(EX4_CONVERGENCE)
 
 
-def test_consistent_decay_scores_as_though_amounts_carried_nothing():
-    """Decay is the expected pattern, so it must add nothing over the same shape
-    with flat amounts - the risk in Example 1 is structural, not value-driven."""
+def test_consistent_decay_scores_below_the_same_shape_with_flat_amounts():
+    """Value evidence is signed.  A clean geometric decay corroborates the flow
+    hypothesis - the money is accounted for - so it must rank *below* the same
+    structure carrying no value information at all, not merely level with it."""
     flat = [(sender, receiver, 100.0) for sender, receiver, _ in EX1_DECAY]
-    assert last(EX1_DECAY) == last(flat)
+    assert last(EX1_DECAY) < last(flat)
+
+
+def test_corroborated_decay_ranks_below_a_bare_extension():
+    """Corroboration has to be able to push a transaction below its own structural
+    tier, or Example 1 could never sit under three tamer-looking shapes."""
+    bare_extension = last([(M, A, 100.0), (A, C, 100.0)])
+    assert last(EX1_DECAY) < bare_extension
+
+
+def test_a_tighter_decay_corroborates_more_than_a_looser_one():
+    """The strength of corroboration tracks how well the trail fits one flow."""
+    tight = [(M, A, 10000.0), (A, C, 9900.0), (C, H, 9801.0), (H, N, 9702.99)]
+    loose = [(M, A, 10000.0), (A, C, 9900.0), (C, H, 8000.0), (H, N, 7000.0)]
+    assert last(tight) < last(loose)
+
+
+def test_flat_amounts_are_neutral_rather_than_corroborating():
+    """A ratio of exactly 1.0 is an absence of value information, not decay.  This
+    is what keeps a uniform-amount stream bit-identical to Phase 2."""
+    flat = [(M, A, 100.0), (A, C, 100.0), (C, H, 100.0), (H, N, 100.0)]
+    assert feed(flat) == feed_phase_two(flat)
 
 
 # --- structural segmentation of the value signal ----------------------------------
@@ -327,6 +350,49 @@ def test_identity_and_value_together_outrank_either_alone():
     combined = last(legs)
     assert combined > last(value_only)
     assert combined > last(identity_only)
+
+
+def test_contradicting_signals_compound_rather_than_merely_adding():
+    """'A unified system rather than evaluated in isolation.'  A chain that both
+    carries a shared device and reverses its value trajectory must score above
+    what the two effects would contribute if they were simply summed."""
+    chain = [(M, A, 10000.0), (A, C, 9900.0), (C, H, 9800.0)]
+    with_device = [(s, r, a, dev(DEV_A)) for s, r, a in chain]
+
+    neither = last(chain + [(H, N, 9700.0)])
+    value_only = last(chain + [(H, N, 9900.0)])
+    identity_only = last(with_device + [(H, N, 9700.0, dev(DEV_A))])
+    both = last(with_device + [(H, N, 9900.0, dev(DEV_A))])
+
+    # Compare on the pre-squash weight, where the combination actually happens:
+    # the squash is monotone, so it cannot create or hide an interaction.
+    raw = lambda score: 2.0 * score / (1.0 - score)
+    additive_prediction = raw(value_only) + raw(identity_only) - raw(neither)
+    assert raw(both) > additive_prediction
+    assert both > value_only > identity_only > neither
+
+
+def test_corroboration_does_not_scale_identity_evidence_down():
+    """Corroboration is a claim about the value dimension only.  A professional
+    layering operation produces clean decay by design, so a tidy amount trail must
+    not be allowed to explain away evidence of common control."""
+    decaying = [(M, A, 10000.0), (A, C, 9900.0), (C, H, 9800.0), (H, N, 9700.0)]
+    flat = [(s, r, 100.0) for s, r, _ in decaying]
+    add_device = lambda legs: [(s, r, a, dev(DEV_A)) for s, r, a in legs]
+
+    # Measured on the pre-squash weight, where the combination happens.
+    raw = lambda score: 2.0 * score / (1.0 - score)
+    uplift_when_corroborated = raw(last(add_device(decaying))) - raw(last(decaying))
+    uplift_when_neutral = raw(last(add_device(flat))) - raw(last(flat))
+
+    # Corroboration lowers the score, but the shared device is worth the same in
+    # absolute terms either way - it is offset, never scaled down.  Tolerance is
+    # loose because scores are rounded to six decimals before the squash is
+    # inverted here; had corroboration *scaled* identity the uplift would have
+    # shrunk to (1 - W_CORROBORATE) of its value, which is far outside it.
+    assert last(add_device(decaying)) < last(add_device(flat))
+    assert uplift_when_corroborated == pytest.approx(uplift_when_neutral, rel=1e-4)
+    assert uplift_when_corroborated > 2 * (1.0 - W_CORROBORATE) * uplift_when_neutral
 
 
 def test_identity_vanishing_mid_flow_still_signals_under_phase_three():
