@@ -240,6 +240,91 @@ def test_holdings_are_carried_to_their_best_price_not_the_first_one():
     assert replay(case, solve_case(case)) == 100 - 20 + 300
 
 
+# --- spending the battery on laps rather than distance --------------------------------
+
+def test_a_short_stretch_is_run_repeatedly_to_compound():
+    """One pass buys only what the starting capital affords.  Running the same
+    stretch again turns each lap's profit into the next lap's stake, which is worth
+    far more than the extra years a deeper trip would have reached."""
+    case = {
+        "energy": 10,
+        "capital": 10,
+        "timeline": {
+            "2037": {"W": {"price": 2, "qty": 0}},
+            "2036": {"W": {"price": 1, "qty": 1000}},
+        },
+    }
+    # Five laps at doubling: 10 -> 20 -> 40 -> 80 -> 160 -> 320.  A single pass,
+    # which is all a straight there-and-back allows, would stop at 20.
+    assert replay(case, solve_case(case)) == 320
+
+
+def test_laps_stop_once_the_supply_is_exhausted():
+    """Compounding is capped by what there is to buy, not by the battery."""
+    case = {
+        "energy": 20,
+        "capital": 10,
+        "timeline": {
+            "2037": {"W": {"price": 5, "qty": 0}},
+            "2036": {"W": {"price": 1, "qty": 12}},
+        },
+    }
+    # Only 12 shares exist; every one ends up sold at 5, so 10 - 12 + 60.
+    assert replay(case, solve_case(case)) == 58
+
+
+def test_depth_still_wins_when_the_bargain_is_only_deep():
+    """Laps must not crowd out a trip that has to be long to be worth anything."""
+    case = {
+        "energy": 6,
+        "capital": 100,
+        "timeline": {
+            "2037": {"Gem": {"price": 100, "qty": 0}},
+            "2036": {"Dud": {"price": 99, "qty": 5}},
+            "2034": {"Gem": {"price": 1, "qty": 50}},
+        },
+    }
+    actions = solve_case(case)
+    # All 50 Gems at 1, resold at 100: 100 - 50 + 5000.
+    assert replay(case, actions) == 5050
+    assert "j-2037-2034" in actions
+
+
+def test_compounding_near_home_can_pay_for_a_deeper_trip():
+    """With too little capital to use the deep bargain on arrival, the winning
+    shape is laps close to home first, then one dive spending the winnings."""
+    case = {
+        "energy": 6,
+        "capital": 2,
+        "timeline": {
+            "2037": {"A": {"price": 1, "qty": 1}, "B": {"price": 5, "qty": 2}},
+            "2036": {"B": {"price": 1, "qty": 2}, "A": {"price": 1, "qty": 0}},
+            "2035": {"B": {"price": 2, "qty": 1}, "A": {"price": 2, "qty": 1}},
+        },
+    }
+    # Diving straight to 2035 reaches the bargain with nothing to spend.
+    assert replay(case, solve_case(case)) == 14
+
+
+def test_laps_never_overrun_the_battery():
+    case = {
+        "energy": 7,
+        "capital": 5,
+        "timeline": {
+            "2037": {"W": {"price": 3, "qty": 0}},
+            "2036": {"W": {"price": 1, "qty": 500}},
+        },
+    }
+    actions = solve_case(case)
+    spent = sum(
+        abs(int(parts[2]) - int(parts[1]))
+        for parts in (action.split("-") for action in actions)
+        if parts[0] == "j"
+    )
+    assert spent <= 7
+    replay(case, actions)  # re-checks every rule, including the energy budget
+
+
 # --- malformed input ------------------------------------------------------------------
 
 @pytest.mark.parametrize(

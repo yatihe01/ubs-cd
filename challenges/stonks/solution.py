@@ -6,31 +6,41 @@ possible.  Buying is capped by each year's `qty` (a stock bought in a given year
 is permanently gone); selling is not capped - the sample sells 50 Apple in a year
 listing only 10, so a year's quantity governs supply, not demand.
 
-The route collapses to a single decision
-----------------------------------------
-Every year in the timeline is <= 2037, so every trip is into the past and back.
-Reaching year `m` and returning costs at least 2 * (2037 - m), and the obvious
-route - walk straight down to `m`, then straight back up - pays exactly that while
-passing through *every* year in between, twice.  Jump cost telescopes
-(2037->2035 costs the same as 2037->2036->2035), so stopping at the intermediate
-years is free.  No cleverer itinerary exists: any route reaching `m` must cover
-that distance twice, and none can visit more than "all of them".
+Distance is not the only thing worth buying with the battery
+------------------------------------------------------------
+Every year is <= 2037, so every trip is into the past and back.  Reaching year `m`
+and returning costs at least 2 * (2037 - m), and walking straight down then
+straight back up pays exactly that while passing through *every* year in between,
+twice - jump cost telescopes, so the intermediate stops are free.
 
-So the only choice is how far back to go, and the answer is "as far as the battery
-allows": D = energy // 2, earliest year = 2037 - D.  Everything after that is a
-trading problem on a fixed sequence of markets:
+That makes it tempting to conclude the only decision is how deep to go, and to
+spend the whole battery on depth.  It is wrong, and expensively so.  A straight
+trip gives each year one chance to buy and one to sell, which is enough only if
+the budget can absorb a year's entire supply in one go.  When it cannot, running a
+*short stretch repeatedly* turns each lap's profit into the next lap's stake and
+the money compounds, while a deeper trip just reaches more years it cannot afford.
+On a two-year timeline with ten energy, one deep pass returns 20 and five laps of
+the same pair return 320.
 
-    2037, 2036, ... , 2037-D, ... , 2036, 2037
-    \________ descent ________/\____ ascent ___/
+So the itinerary is searched rather than assumed.  Three families are simulated
+and the money picks the winner:
 
-Each year appears twice and shares one pool of `qty` across both visits.  Buying on
-the descent strictly dominates buying on the ascent - the ascent still lies ahead,
-so every later year remains available to sell into - which is why opportunities are
-deduplicated to their earliest appearance.
+  * straight - down to the deepest reachable year and back, for when the prize is
+    simply far away.  Only the deepest is tried: it passes through every shallower
+    year, so it can do anything a shallower trip could.
+  * cycling - descend, then run laps over a short stretch, for when the prize is
+    close but too expensive to take in one bite.
+  * lap-then-dive - laps near home first, then one deeper trip, for when the
+    starting capital is too small to exploit a distant bargain on arrival.
+
+Whichever route is chosen, each year appears several times and shares one pool of
+`qty` across every visit.
 
 The trading problem
 -------------------
-A forward simulation over those stops, holding cash and shares.  At each stop:
+A forward simulation over one itinerary's stops, holding cash and shares.  Every
+candidate route is run through it and the one ending on the most cash wins.  At
+each stop:
 
   1. Liquidate every holding the current year prices, into cash.
   2. Offer that cash a menu of opportunities, each a (price, available, sell price)
@@ -57,6 +67,7 @@ best recovers those cases at negligible cost.
 from __future__ import annotations
 
 import heapq
+import math
 from typing import Any, NamedTuple
 
 
@@ -79,6 +90,36 @@ RESTART_LIMIT = 12
 # spent richest-return-first, but a large budget genuinely reaches deep into it -
 # capping at 160 entries cost 75% of the profit on that same timeline.
 BROAD_MENU = 48
+
+# Laps compound the money, so the useful count is logarithmic: once the budget can
+# take a year's whole supply in one go, another lap adds nothing.  Capping keeps
+# the simulated itinerary short on a big battery, and laps that turn out to be
+# barren cost no energy anyway - rendering drops stops that never trade.
+MAX_LAPS = 40
+
+# How many cycling stretches to simulate in full, and how long an itinerary may
+# get, against the size of the timeline.  There are O(years^2) stretches and each
+# is a whole simulation costing about O(stops^2 * stocks), so a fixed budget either
+# crawls on a long timeline or leaves a short one under-searched.
+#
+# Small cases get the full search and are the ones the exhaustive oracle checks.
+# Large cases lose breadth rather than time: the leading stretch is nearly always
+# the one that wins, and laps past what the supply can feed earn nothing anyway.
+SEARCH_BUDGETS = (
+    # (timeline size at or below, cycling stretches, longest itinerary)
+    (240, 12, 400),
+    (1200, 8, 260),
+    (4000, 5, 160),
+    (None, 3, 120),
+)
+
+
+def _search_budget(years: int, stocks: int) -> tuple[int, int]:
+    scale = years * max(stocks, 1)
+    for limit, candidates, stops in SEARCH_BUDGETS:
+        if limit is None or scale <= limit:
+            return candidates, stops
+    return SEARCH_BUDGETS[-1][1:]
 
 
 class Opportunity(NamedTuple):
@@ -158,13 +199,72 @@ def parse_timeline(raw: Any) -> dict[int, dict[str, tuple[int, int]]]:
     return markets
 
 
-def _build_route(years: list[int]) -> list[int]:
-    """Descend through the tradeable years, then climb back.  The deepest year is
-    the turning point, so it appears once; every other year appears twice."""
-    descending = sorted(years, reverse=True)
-    deepest = descending[-1]
-    ascending = [year for year in sorted(years) if year > deepest]
+def _straight_route(years: list[int], deepest: int) -> list[int]:
+    """Descend to `deepest`, then climb back.  The turning point appears once;
+    every other year appears twice."""
+    within = [year for year in years if year >= deepest]
+    descending = sorted(within, reverse=True)
+    ascending = [year for year in sorted(within) if year > deepest]
     return descending + ascending
+
+
+def _cycling_route(
+    years: list[int], deepest: int, peak: int, laps: int, max_stops: int
+) -> list[int]:
+    """Descend to `deepest`, run `laps` extra round trips up to `peak` and back,
+    then climb home.
+
+    A straight there-and-back visits each year once on the way down and once on
+    the way up, which is one chance to buy and one to sell.  That is enough only
+    when the budget can absorb a year's whole supply in a single go.  When it
+    cannot, running the same stretch again turns the profit from one lap into the
+    stake for the next, and the money compounds - which is worth far more than the
+    extra years a deeper trip would have reached.
+
+    A lap over the stretch costs `2 * (peak - deepest)`, so a short, steep stretch
+    can be run many times on the same battery that one long descent would drain.
+    """
+    below = [year for year in years if year >= deepest]
+    descending = sorted(below, reverse=True)
+    inside = [year for year in sorted(below) if deepest <= year <= peak]
+    up = [year for year in inside if year > deepest]
+    down = sorted((year for year in inside if year < peak), reverse=True)
+
+    home = [year for year in sorted(below) if year > deepest]
+    lap = up + down
+    if lap:
+        room = (max_stops - len(descending) - len(home)) // len(lap)
+        laps = max(0, min(laps, room))
+    else:
+        laps = 0
+    return descending + lap * laps + home
+
+
+def _lap_then_dive_route(
+    years: list[int], lap_floor: int, deepest: int, laps: int, max_stops: int
+) -> list[int]:
+    """Run `laps` shallow round trips down to `lap_floor` first, then spend the
+    winnings on one deeper trip to `deepest`.
+
+    The mirror of `_cycling_route`, and it matters when the starting capital is too
+    small to exploit the deep bargain on arrival.  Compounding close to home is
+    cheap per lap, and the money it builds is what makes the expensive trip worth
+    taking - diving first would reach the bargain with nothing to spend.
+    """
+    lap = _straight_route(years, lap_floor)
+    dive = _straight_route(years, deepest)
+    if not lap:
+        return dive
+    laps = max(0, min(laps, (max_stops - len(dive)) // len(lap)))
+    return lap * laps + dive
+
+
+def _energy_spent(actions: list[str]) -> int:
+    return sum(
+        abs(int(parts[2]) - int(parts[1]))
+        for parts in (action.split("-") for action in actions)
+        if parts[0] == "j"
+    )
 
 
 def _best_later_prices(
@@ -304,25 +404,13 @@ def _allocate(
     return best_plan
 
 
-def solve_case(case: Any) -> list[str]:
-    """The action list for one test case, or `[]` when nothing is worth doing -
-    staying in 2037 is always legal and always costs nothing."""
-    if not isinstance(case, dict):
-        return []
-
-    energy = _coerce_positive_int(case.get("energy")) or 0
-    capital = _coerce_positive_int(case.get("capital")) or 0
-    markets = parse_timeline(case.get("timeline"))
-    if energy < 2 or capital <= 0 or not markets:
-        return []
-
-    # Half the battery goes on the return leg, so this is how far back we can get.
-    earliest = START_YEAR - energy // 2
-    reachable = [year for year in markets if year >= earliest]
-    if not reachable:
-        return []
-
-    route = _build_route(reachable)
+def _simulate(
+    route: list[int],
+    markets: dict[int, dict[str, tuple[int, int]]],
+    capital: int,
+) -> tuple[int, list[list[str]]]:
+    """Trade the itinerary through and report the cash it ends on, with the trades
+    made at each stop."""
     later_prices = _best_later_prices(route, markets)
     menu = _build_menu(route, markets, later_prices)
 
@@ -435,7 +523,7 @@ def solve_case(case: Any) -> list[str]:
             supply[(year, stock)] -= shares
             trades[index].append(f"b-{stock}-{shares}")
 
-    return _render(route, trades)
+    return cash, trades
 
 
 def _render(route: list[int], trades: list[list[str]]) -> list[str]:
@@ -457,6 +545,122 @@ def _render(route: list[int], trades: list[list[str]]) -> list[str]:
     if current != START_YEAR:
         actions.append(f"j-{current}-{START_YEAR}")
     return actions
+
+
+def _candidate_routes(
+    reachable: list[int],
+    markets: dict[int, dict[str, tuple[int, int]]],
+    energy: int,
+) -> list[list[int]]:
+    """Itineraries worth trying, best-looking first.
+
+    Two families.  Straight there-and-back to every depth covers the case where the
+    prize is simply far away.  Cycling covers the case where it is close but too
+    expensive to take in one bite, and needs the battery spent on laps instead of
+    distance.  Which wins is not decidable up front - it depends on supply, prices
+    and the budget together - so both are simulated and the money decides.
+
+    Cycling pairs are scored before simulating, since there are O(years^2) of them.
+    A lap multiplies the money by roughly the best ratio inside the stretch, so
+    `laps * log(ratio)` ranks them by the wealth they could compound to.
+    """
+    ascending = sorted(reachable)
+    breadth, max_stops = _search_budget(
+        len(ascending), max((len(market) for market in markets.values()), default=1)
+    )
+    # Only the deepest straight trip is worth simulating: it passes through every
+    # shallower year on the way, so it can do anything a shallower trip could, and
+    # the battery it saves has nowhere else to go within this family.
+    routes = [_straight_route(reachable, ascending[0])]
+
+    # Best buy price and best sell price for every stretch, swept in one pass so
+    # scoring stays O(years^2 * stocks) rather than re-scanning per pair.
+    scored: list[tuple[float, int, int, int]] = []
+    for low_index, deepest in enumerate(ascending):
+        travel = 2 * (START_YEAR - deepest)
+        if travel > energy:
+            continue
+        cheapest: dict[str, int] = {}
+        dearest: dict[str, int] = {}
+        for peak in ascending[low_index:]:
+            for stock, (price, quantity) in markets[peak].items():
+                if quantity > 0 and price < cheapest.get(stock, price + 1):
+                    cheapest[stock] = price
+                if price > dearest.get(stock, 0):
+                    dearest[stock] = price
+            span = peak - deepest
+            if span <= 0:
+                continue
+            laps = (energy - travel) // (2 * span)
+            if laps <= 0:
+                continue
+            ratio = max(
+                (dearest[stock] / cheapest[stock] for stock in cheapest),
+                default=1.0,
+            )
+            if ratio <= 1.0:
+                continue
+            laps = min(laps, MAX_LAPS)
+            scored.append((laps * math.log(ratio), deepest, peak, laps))
+
+    scored.sort(reverse=True)
+    for _, deepest, peak, laps in scored[:breadth]:
+        routes.append(_cycling_route(reachable, deepest, peak, laps, max_stops))
+
+    # Compound close to home first, then spend the winnings on one deeper trip.
+    warmups: list[tuple[float, int, int, int]] = []
+    for lap_floor in ascending:
+        lap_travel = 2 * (START_YEAR - lap_floor)
+        if lap_travel <= 0:
+            continue
+        for deepest in ascending:
+            dive_travel = 2 * (START_YEAR - deepest)
+            if dive_travel <= lap_travel or dive_travel > energy:
+                continue
+            laps = min((energy - dive_travel) // lap_travel, MAX_LAPS)
+            if laps <= 0:
+                continue
+            warmups.append((float(laps), lap_floor, deepest, laps))
+    warmups.sort(reverse=True)
+    for _, lap_floor, deepest, laps in warmups[:breadth]:
+        routes.append(
+            _lap_then_dive_route(reachable, lap_floor, deepest, laps, max_stops)
+        )
+    return routes
+
+
+def solve_case(case: Any) -> list[str]:
+    """The action list for one test case, or `[]` when nothing is worth doing -
+    staying in 2037 is always legal and always costs nothing."""
+    if not isinstance(case, dict):
+        return []
+
+    energy = _coerce_positive_int(case.get("energy")) or 0
+    capital = _coerce_positive_int(case.get("capital")) or 0
+    markets = parse_timeline(case.get("timeline"))
+    if energy < 2 or capital <= 0 or not markets:
+        return []
+
+    # Half the battery goes on the return leg, so this is how far back we can get.
+    earliest = START_YEAR - energy // 2
+    reachable = [year for year in markets if year >= earliest]
+    if not reachable:
+        return []
+
+    best_actions: list[str] = []
+    best_cash = capital
+    for route in _candidate_routes(reachable, markets, energy):
+        cash, trades = _simulate(route, markets, capital)
+        if cash <= best_cash:
+            continue
+        actions = _render(route, trades)
+        # Barren stops are dropped by rendering, which can only shorten the trip,
+        # so this should always hold - checked because an over-budget answer scores
+        # nothing at all, and silently keeping one would be the worst outcome.
+        if _energy_spent(actions) > energy:
+            continue
+        best_actions, best_cash = actions, cash
+    return best_actions
 
 
 def solve_batch(batch: Any) -> list[list[str]]:
