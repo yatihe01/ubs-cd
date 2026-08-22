@@ -76,6 +76,17 @@ by construction rather than by tuning against the brief's specific numbers.
 
 With every amount on the stream identical, or with no predecessor edge anywhere,
 `value_mod` is 0.0 and the score is bit-for-bit the Phase 2 score.
+
+The final ranking is occurrence-first across all layers.  Distinct structural,
+identity, disconnected-reuse, and contradictory value observations are summed.
+The weighted `raw` formula above then selects position inside that count tier:
+
+    tie       = 0.5 * raw / (raw + SQUASH)       # always below half a tier
+    rank_raw  = occurrence_count + tie
+    risk      = rank_raw / (rank_raw + 2)
+
+Consequently any extra risky occurrence outranks any lower-count case regardless
+of signal weight; the weights matter only when occurrence counts tie.
 """
 
 from __future__ import annotations
@@ -85,6 +96,11 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from challenges.ghost_chains.ranking import (
+    directed_cycle_rank,
+    occurrence_rank_score,
+)
 
 
 # ----- Phase 1 constants (unchanged) ---------------------------------------------
@@ -105,8 +121,8 @@ W_CYCLE = 6.0
 
 # Weight of a *shortened* path, the signal the brief names alongside new paths.
 # It multiplies a per-node gain that is exactly zero for a first connection and
-# for a plain repeat, so W_SHORTCUT = 0.0 reproduces the measured 380 model
-# bit-for-bit (verified over 300 randomised streams) and is the rollback.
+# for a plain repeat.  W_SHORTCUT = 0.0 reproduces the measured 380 model's
+# weighted structural raw value; occurrence-first ranking is applied afterward.
 # Kept in step with `solution.py` and `solution2.py`: the structural core is
 # shared verbatim across the three phases and the parity tests enforce it.
 #
@@ -340,9 +356,15 @@ class GhostChainsModel:
         backward = _damped_walks(self._radj, source)   # a -> ... -> source
         forward = _damped_walks(self._adj, target)     # target -> ... -> b
 
-        structural = self._structural_raw(source, target, backward, forward)
-        align, standalone = self._identity_raw(transaction, backward, forward)
-        value_mod = self._value_raw(transaction, source, backward)
+        structural, structural_occurrences = self._structural_raw(
+            source, target, backward, forward
+        )
+        align, standalone, local_identity_occurrences, reuse_occurrences = (
+            self._identity_raw(transaction, backward, forward)
+        )
+        value_mod, value_occurrences = self._value_raw(
+            transaction, source, backward
+        )
 
         # Contradicting evidence compounds; corroborating evidence only offsets.
         #
@@ -379,7 +401,13 @@ class GhostChainsModel:
         # the brief calls it a coordination hint rather than proof.
         raw = structural * modifier + CROSS_GAIN * standalone
 
-        return round(raw / (raw + SQUASH), 6)
+        occurrence_count = structural_occurrences + reuse_occurrences
+        if structural_occurrences:
+            occurrence_count += local_identity_occurrences + value_occurrences
+
+        return occurrence_rank_score(
+            occurrence_count, raw, weighted_squash=SQUASH
+        )
 
     def _structural_raw(
         self,
@@ -387,7 +415,7 @@ class GhostChainsModel:
         target: str,
         backward: dict[str, float],
         forward: dict[str, float],
-    ) -> float:
+    ) -> tuple[float, int]:
         forward_total = sum(forward.values())
 
         # Nodes that could already reach `target`: for them the new edge adds a
@@ -442,7 +470,34 @@ class GhostChainsModel:
         baseline = GAMMA * trivial
         if source == target:
             baseline += GAMMA * W_CYCLE
-        return max(raw - baseline, 0.0)
+        raw = max(raw - baseline, 0.0)
+
+        convergence_occurrences = sum(
+            1
+            for predecessor in self._radj.get(target) or ()
+            if predecessor != source
+        )
+        relevant_nodes = set(backward) | set(forward)
+        existing_cycle_occurrences = directed_cycle_rank(
+            self._adj, self._radj, relevant_nodes
+        )
+        closes_cycle = any(
+            successor in backward and successor != target
+            for successor in self._adj.get(target) or ()
+        )
+        new_cycle_occurrences = int(
+            closes_cycle and not self._edges.get((source, target), 0)
+        )
+        shortcut_occurrences = int(depths.get(source, 0) > 1)
+        occurrence_count = (
+            convergence_occurrences
+            + existing_cycle_occurrences
+            + new_cycle_occurrences
+            + shortcut_occurrences
+        )
+        if raw > 0.0 and occurrence_count == 0:
+            occurrence_count = 1
+        return raw, occurrence_count
 
     # ----- identity ---------------------------------------------------------------
 
@@ -451,8 +506,8 @@ class GhostChainsModel:
         transaction: Transaction,
         backward: dict[str, float],
         forward: dict[str, float],
-    ) -> tuple[float, float]:
-        """Return `(align, standalone)`.
+    ) -> tuple[float, float, int, int]:
+        """Return weighted and occurrence identity evidence.
 
         `align` is the fraction-of-flow evidence that modulates the structural
         weight; `standalone` is identity reuse across disconnected components.
@@ -463,7 +518,7 @@ class GhostChainsModel:
         # before touching the walk results: this is what keeps a Phase 1 workload at
         # exactly Phase 1 throughput as well as exactly Phase 1 scores.
         if not any(self._node_values[kind] for kind in KINDS):
-            return 0.0, 0.0
+            return 0.0, 0.0, 0, 0
 
         # The flow this transaction joins: upstream of the sender plus downstream of
         # the receiver, damped by distance.  Both halves include their own endpoint
@@ -475,6 +530,8 @@ class GhostChainsModel:
 
         align = 0.0
         standalone = 0.0
+        local_occurrences = 0
+        reuse_occurrences = 0
         local: set[str] | None = None
 
         for kind, value in transaction.identity():
@@ -507,8 +564,10 @@ class GhostChainsModel:
                         by_value[seen] = by_value.get(seen, 0.0) + weight
                 elif value in counts:
                     agree += weight
+                    local_occurrences += 1
                 else:
                     diverge += weight
+                    local_occurrences += 1
 
             weight_of_kind = KIND_WEIGHT[kind]
 
@@ -518,6 +577,8 @@ class GhostChainsModel:
                 # left to break, and a flow with no identity at all scores nothing.
                 dominant = max(by_value.values(), default=0.0)
                 align += weight_of_kind * W_ABSENT * (dominant / mass)
+                if dominant > 0.0:
+                    local_occurrences += 1
                 continue
 
             align += weight_of_kind * (
@@ -532,13 +593,14 @@ class GhostChainsModel:
                     )
                 disconnected = _count_disconnected(txs, local)
                 if disconnected:
+                    reuse_occurrences += disconnected
                     standalone += (
                         weight_of_kind
                         * W_CROSS
                         * (disconnected / (disconnected + CROSS_HALF))
                     )
 
-        return align, standalone
+        return align, standalone, local_occurrences, reuse_occurrences
 
     def _local_component(self, source: str, target: str) -> set[str]:
         """Entities reachable from either endpoint ignoring edge direction, within
@@ -566,7 +628,7 @@ class GhostChainsModel:
         transaction: Transaction,
         source: str,
         backward: dict[str, float],
-    ) -> float:
+    ) -> tuple[float, int]:
         """Return the signed value modifier from the amount trail of the single
         inferred flow segment this transaction extends.
 
@@ -589,7 +651,7 @@ class GhostChainsModel:
         """
         trail = self._amount_trail(source, backward)
         if not trail:
-            return 0.0
+            return 0.0, 0
 
         trail.append(transaction.amount)
         ratios = [
@@ -598,19 +660,29 @@ class GhostChainsModel:
             if trail[i] > 0.0
         ]
         if not ratios:
-            return 0.0
+            return 0.0, 0
+
+        # The scored hop contributes one value occurrence when it reverses or loses
+        # most of the preceding amount.  A contradictory trail also contributes
+        # one aggregate incoherence occurrence below; historical hops are context,
+        # not repeatedly charged observations.
+        last = ratios[-1]
+        risky_occurrences = int(
+            last > 1.0 or 0.0 <= last < RETENTION_FLOOR
+        )
 
         # A reversal is judged on the hop being scored, so it needs no history
         # beyond the one leg that fed it.
-        last = ratios[-1]
         if last > 1.0:
-            return REVERSAL_BASE + REVERSAL_RAMP * min(
-                1.0, (last - 1.0) / REVERSAL_SCALE
+            return (
+                REVERSAL_BASE
+                + REVERSAL_RAMP * min(1.0, (last - 1.0) / REVERSAL_SCALE),
+                risky_occurrences,
             )
 
         # Coherence is a property of the trail, so it is undefined on a single hop.
         if len(ratios) < 2:
-            return 0.0
+            return 0.0, risky_occurrences
 
         spread = max(ratios) - min(ratios)
         if all(RETENTION_FLOOR <= ratio < 1.0 for ratio in ratios):
@@ -618,9 +690,12 @@ class GhostChainsModel:
             # hypothesis explains the money.  The tighter the progression, the
             # more it corroborates.
             coherence = 1.0 - min(1.0, spread / SPREAD_SCALE)
-            return -W_CORROBORATE * coherence
+            return -W_CORROBORATE * coherence, risky_occurrences
 
-        return W_INCOHERENT * min(1.0, spread / SPREAD_SCALE)
+        return (
+            W_INCOHERENT * min(1.0, spread / SPREAD_SCALE),
+            max(risky_occurrences, 1 if spread > 0.0 else 0),
+        )
 
     def _amount_trail(self, source: str, backward: dict[str, float]) -> list[float]:
         """Amounts along the strongest inferred path ending at `source`, oldest

@@ -3,8 +3,8 @@
 Phase 1 lives on in `solution.py` and is reproduced here unchanged: the score is
 still a *delta* on a damped-walk (Katz-style) view of the active graph, split by
 the pre-existing relationship of the endpoints (new path / redundant route /
-closed loop) and squashed by `raw / (raw + SQUASH)`.  See `solution.py` for the
-derivation; nothing in that half moved.
+closed loop).  See `solution.py` for the weighted derivation and occurrence-first
+ranking shared by every phase.
 
 Phase 2 adds `ipAddress` and `deviceId` as an *identity* layer.  The brief's core
 principle is that identity contributes "relative to where the transaction sits in
@@ -38,9 +38,10 @@ stay at 0.0).
 
 The one identity observation that is *not* about the local flow is reuse across
 disconnected components (Example 4): the same address or device turning up in parts
-of the graph that cannot reach each other.  Structure says nothing there, so it has
-nothing to amplify; it is added as a small standalone term that saturates - "a
-coordination hint, not automatic proof of risk on its own".
+of the graph that cannot reach each other.  Structure says nothing there, so its
+weighted severity is a small standalone term that saturates.  Under the experimental
+occurrence-first policy, however, every distinct reuse observation still contributes
+one primary occurrence; enough weak observations therefore outrank fewer strong ones.
 
 `ipAddress` and `deviceId` are scored as independent dimensions and summed, with
 the address weighted lower: NAT and shared office egress make a shared address much
@@ -48,6 +49,10 @@ weaker evidence than a shared device.
 
 With no identity fields anywhere in the stream every identity term is exactly zero
 and the score is bit-for-bit the Phase 1 score.
+
+Identity occurrences are counted per localized device/address observation, including
+multiple observations in the same identity dimension.  Their existing weights are
+used only to rank transactions with the same total number of occurrences.
 """
 
 from __future__ import annotations
@@ -57,6 +62,11 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from challenges.ghost_chains.ranking import (
+    directed_cycle_rank,
+    occurrence_rank_score,
+)
 
 
 # ----- Phase 1 constants (unchanged) ---------------------------------------------
@@ -77,8 +87,8 @@ W_CYCLE = 6.0
 
 # Weight of a *shortened* path, the signal the brief names alongside new paths.
 # It multiplies a per-node gain that is exactly zero for a first connection and
-# for a plain repeat, so W_SHORTCUT = 0.0 reproduces the measured 380 model
-# bit-for-bit (verified over 300 randomised streams) and is the rollback.
+# for a plain repeat.  W_SHORTCUT = 0.0 reproduces the measured 380 model's
+# weighted structural raw value; occurrence-first ranking is applied afterward.
 W_SHORTCUT = 2.0
 
 # Squash constant; larger spreads the low end, smaller spreads the high end.
@@ -265,15 +275,28 @@ class GhostChainsModel:
         backward = _damped_walks(self._radj, source)   # a -> ... -> source
         forward = _damped_walks(self._adj, target)     # target -> ... -> b
 
-        structural = self._structural_raw(source, target, backward, forward)
-        align, standalone = self._identity_raw(transaction, backward, forward)
+        structural, structural_occurrences = self._structural_raw(
+            source, target, backward, forward
+        )
+        align, standalone, local_identity_occurrences, reuse_occurrences = (
+            self._identity_raw(transaction, backward, forward)
+        )
 
         # Identity that lines up with the flow amplifies the structural weight;
         # identity reuse across disconnected components has no structure to
         # amplify, so it enters additively and small.
         raw = structural * (1.0 + IDENTITY_GAIN * align) + CROSS_GAIN * standalone
 
-        return round(raw / (raw + SQUASH), 6)
+        # Flow-relative identity is evidence only when there is a structural flow
+        # for it to describe.  Disconnected reuse is independently observable and
+        # therefore contributes occurrences even when structural risk is zero.
+        occurrence_count = structural_occurrences + reuse_occurrences
+        if structural_occurrences:
+            occurrence_count += local_identity_occurrences
+
+        return occurrence_rank_score(
+            occurrence_count, raw, weighted_squash=SQUASH
+        )
 
     def _structural_raw(
         self,
@@ -281,7 +304,7 @@ class GhostChainsModel:
         target: str,
         backward: dict[str, float],
         forward: dict[str, float],
-    ) -> float:
+    ) -> tuple[float, int]:
         forward_total = sum(forward.values())
 
         # Nodes that could already reach `target`: for them the new edge adds a
@@ -336,7 +359,34 @@ class GhostChainsModel:
         baseline = GAMMA * trivial
         if source == target:
             baseline += GAMMA * W_CYCLE
-        return max(raw - baseline, 0.0)
+        raw = max(raw - baseline, 0.0)
+
+        convergence_occurrences = sum(
+            1
+            for predecessor in self._radj.get(target) or ()
+            if predecessor != source
+        )
+        relevant_nodes = set(backward) | set(forward)
+        existing_cycle_occurrences = directed_cycle_rank(
+            self._adj, self._radj, relevant_nodes
+        )
+        closes_cycle = any(
+            successor in backward and successor != target
+            for successor in self._adj.get(target) or ()
+        )
+        new_cycle_occurrences = int(
+            closes_cycle and not self._edges.get((source, target), 0)
+        )
+        shortcut_occurrences = int(depths.get(source, 0) > 1)
+        occurrence_count = (
+            convergence_occurrences
+            + existing_cycle_occurrences
+            + new_cycle_occurrences
+            + shortcut_occurrences
+        )
+        if raw > 0.0 and occurrence_count == 0:
+            occurrence_count = 1
+        return raw, occurrence_count
 
     # ----- identity ---------------------------------------------------------------
 
@@ -345,8 +395,8 @@ class GhostChainsModel:
         transaction: Transaction,
         backward: dict[str, float],
         forward: dict[str, float],
-    ) -> tuple[float, float]:
-        """Return `(align, standalone)`.
+    ) -> tuple[float, float, int, int]:
+        """Return weighted and occurrence identity evidence.
 
         `align` is the fraction-of-flow evidence that modulates the structural
         weight; `standalone` is identity reuse across disconnected components.
@@ -357,7 +407,7 @@ class GhostChainsModel:
         # before touching the walk results: this is what keeps a Phase 1 workload at
         # exactly Phase 1 throughput as well as exactly Phase 1 scores.
         if not any(self._node_values[kind] for kind in KINDS):
-            return 0.0, 0.0
+            return 0.0, 0.0, 0, 0
 
         # The flow this transaction joins: upstream of the sender plus downstream of
         # the receiver, damped by distance.  Both halves include their own endpoint
@@ -369,6 +419,8 @@ class GhostChainsModel:
 
         align = 0.0
         standalone = 0.0
+        local_occurrences = 0
+        reuse_occurrences = 0
         local: set[str] | None = None
 
         for kind, value in transaction.identity():
@@ -401,8 +453,10 @@ class GhostChainsModel:
                         by_value[seen] = by_value.get(seen, 0.0) + weight
                 elif value in counts:
                     agree += weight
+                    local_occurrences += 1
                 else:
                     diverge += weight
+                    local_occurrences += 1
 
             weight_of_kind = KIND_WEIGHT[kind]
 
@@ -412,6 +466,10 @@ class GhostChainsModel:
                 # left to break, and a flow with no identity at all scores nothing.
                 dominant = max(by_value.values(), default=0.0)
                 align += weight_of_kind * W_ABSENT * (dominant / mass)
+                if dominant > 0.0:
+                    # The missing field is one observed disappearance; the prior
+                    # nodes establish its strength but do not duplicate the event.
+                    local_occurrences += 1
                 continue
 
             align += weight_of_kind * (
@@ -426,13 +484,14 @@ class GhostChainsModel:
                     )
                 disconnected = _count_disconnected(txs, local)
                 if disconnected:
+                    reuse_occurrences += disconnected
                     standalone += (
                         weight_of_kind
                         * W_CROSS
                         * (disconnected / (disconnected + CROSS_HALF))
                     )
 
-        return align, standalone
+        return align, standalone, local_occurrences, reuse_occurrences
 
     def _local_component(self, source: str, target: str) -> set[str]:
         """Entities reachable from either endpoint ignoring edge direction, within
