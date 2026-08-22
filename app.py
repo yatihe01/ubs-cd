@@ -7,6 +7,7 @@ from starlette.routing import Mount
 
 from challenges import BLUEPRINTS
 from challenges.adaptive_gateway.routes import handle_solve as active_challenge
+from challenges.showdown.phase_1 import handle_move as showdown_move
 from challenges.tool_box import mcp_app as tool_box_mcp_app
 
 
@@ -23,6 +24,17 @@ def create_app() -> Flask:
         "/solve",
         endpoint="active_challenge",
         view_func=active_challenge,
+        methods=["POST"],
+    )
+
+    # SHOWDOWN calls {registered_base_url}/move. Answer at the root as well as
+    # under /showdown so the bot plays whichever base URL was registered: the
+    # root health check passes either way, so a mismatch here does not look
+    # like a failure, it looks like a bot that folds every hand.
+    app.add_url_rule(
+        "/move",
+        endpoint="showdown_move",
+        view_func=showdown_move,
         methods=["POST"],
     )
 
