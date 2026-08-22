@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import re
-from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
 import httpx
@@ -71,25 +70,28 @@ _ALIASES = (
 )
 
 
-def retrieve_study_passages(question: str) -> list[str]:
-    """Return relevant source passages, never exceeding 900 o200k tokens."""
+def retrieve_study_passages(question: str, semantic_context: str) -> list[str]:
+    """Return passages using both the original question and an LLM query rewrite."""
 
     if not isinstance(question, str) or not question.strip():
         raise ValueError("question must be a non-empty string")
-    return select_passages(question, _load_documents())
+    if not isinstance(semantic_context, str) or not semantic_context.strip():
+        raise ValueError("semantic_context must be a non-empty string")
+    return select_passages(
+        question,
+        _load_documents(),
+        semantic_context=semantic_context,
+    )
 
 
 @lru_cache(maxsize=1)
 def _load_documents() -> tuple[str, ...]:
-    """Fetch all five small documents concurrently and retain them for the process."""
+    """Fetch all documents over one keep-alive connection and cache the corpus."""
 
-    def fetch(source: tuple[str, str]) -> str:
+    def fetch(client: httpx.Client, source: tuple[str, str]) -> str:
         document_id, title = source
-        response = httpx.get(
+        response = client.get(
             f"{STUDY_BASE_URL}/{document_id}",
-            headers={"Accept": "text/markdown, text/plain;q=0.9"},
-            timeout=httpx.Timeout(6.0, connect=3.0),
-            follow_redirects=True,
         )
         response.raise_for_status()
         if not response.text.strip():
@@ -98,18 +100,31 @@ def _load_documents() -> tuple[str, ...]:
         # This preserves which organisation or facility each passage belongs to.
         return f"# {title}\n\n{response.text}"
 
-    with ThreadPoolExecutor(max_workers=len(DOCUMENT_SOURCES)) as executor:
-        return tuple(executor.map(fetch, DOCUMENT_SOURCES))
+    transport = httpx.HTTPTransport(retries=1)
+    with httpx.Client(
+        headers={"Accept": "text/markdown, text/plain;q=0.9"},
+        timeout=httpx.Timeout(7.0, connect=3.5),
+        follow_redirects=True,
+        transport=transport,
+    ) as client:
+        return tuple(fetch(client, source) for source in DOCUMENT_SOURCES)
 
 
-def select_passages(question: str, documents: tuple[str, ...] | list[str]) -> list[str]:
-    """Rank markdown passages lexically and fit the strongest ones into the limit."""
+def select_passages(
+    question: str,
+    documents: tuple[str, ...] | list[str],
+    *,
+    semantic_context: str = "",
+) -> list[str]:
+    """Rank passages with semantic rewrite, lexical, and fuzzy word evidence."""
 
     passages = [passage for document in documents for passage in _split_markdown(document)]
     if not passages:
         raise ValueError("study materials did not contain any passages")
 
-    query_terms = _expand_query(_terms(question))
+    original_terms = _terms(question)
+    semantic_terms = _terms(semantic_context)
+    query_terms = _expand_query(original_terms + semantic_terms)
     passage_terms = [_terms(passage) for passage in passages]
     document_frequency = {
         term: sum(term in terms for terms in passage_terms)
@@ -117,7 +132,11 @@ def select_passages(question: str, documents: tuple[str, ...] | list[str]) -> li
     }
     average_length = sum(len(terms) for terms in passage_terms) / len(passage_terms)
 
-    distinctive = [term for term in _terms(question) if term not in _STOP_WORDS]
+    distinctive = [
+        term
+        for term in original_terms + semantic_terms
+        if term not in _STOP_WORDS
+    ]
     ranked: list[tuple[float, int, str]] = []
     for index, (passage, terms) in enumerate(zip(passages, passage_terms, strict=True)):
         score = _bm25_score(
@@ -129,6 +148,7 @@ def select_passages(question: str, documents: tuple[str, ...] | list[str]) -> li
         )
         term_set = set(terms)
         score += 2.5 * sum(term in term_set for term in distinctive)
+        score += _fuzzy_morphology_score(distinctive, term_set)
         ranked.append((score, -index, passage))
 
     ranked.sort(reverse=True)
@@ -248,6 +268,33 @@ def _bm25_score(
         denominator = frequency + 1.5 * (0.25 + 0.75 * len(terms) / max(average_length, 1))
         score += inverse_frequency * frequency * 2.5 / denominator
     return score
+
+
+def _fuzzy_morphology_score(query_terms: list[str], passage_terms: set[str]) -> float:
+    """Reward close forms such as scrubbing/scrubber without broad substring hits."""
+
+    score = 0.0
+    candidates = [term for term in passage_terms if len(term) >= 5]
+    for query_term in set(query_terms):
+        if len(query_term) < 5 or query_term in passage_terms:
+            continue
+        query_grams = _character_grams(query_term)
+        best_similarity = 0.0
+        for candidate in candidates:
+            if candidate[0] != query_term[0]:
+                continue
+            candidate_grams = _character_grams(candidate)
+            similarity = len(query_grams & candidate_grams) / len(
+                query_grams | candidate_grams
+            )
+            best_similarity = max(best_similarity, similarity)
+        if best_similarity >= 0.38:
+            score += 2.0 * best_similarity
+    return score
+
+
+def _character_grams(word: str) -> set[str]:
+    return {word[index : index + 3] for index in range(len(word) - 2)}
 
 
 def _truncate_to_bytes(text: str, maximum: int) -> str:

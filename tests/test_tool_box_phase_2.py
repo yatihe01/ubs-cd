@@ -1,7 +1,10 @@
 import pytest
 
 from challenges.tool_box.routing import find_cheapest_path
-from challenges.tool_box.study_retrieval import select_passages
+from challenges.tool_box.study_retrieval import (
+    retrieve_study_passages,
+    select_passages,
+)
 
 
 def test_retrieval_handles_paraphrased_calibration_question():
@@ -46,6 +49,41 @@ Temporary contractor support can swell the group to just under fifty individuals
 
     assert "forty-one" in passages[0]
     assert "Staffing Roster" in passages[0]
+
+
+def test_semantic_context_resolves_air_scrubber_failure_distractors():
+    documents = (
+        """# Meridian Trench Research Station
+## Incident Reports
+An oxygen scrubber failure occurred on 2 November, prompting an emergency
+ventilation drill. Investigators traced the failure to a corroded valve seat.
+""",
+        """# Ashgrove Metropolitan Transit Authority
+## Driver Shift Protocols
+Driving time is capped before a mandatory break is required.
+""",
+        """# Thornmere Growers Cooperative Yearbook
+## Incident Reports
+A door-seal failure on 4 April let warm air into the Old Kiln store overnight.
+""",
+    )
+
+    passages = select_passages(
+        "On what date did the air-scrubbing equipment break down?",
+        documents,
+        semantic_context=(
+            "oxygen scrubber failure ventilation malfunction breakdown date"
+        ),
+    )
+
+    assert "2 November" in passages[0]
+    assert "Meridian Trench Research Station — Incident Reports" in passages[0]
+
+
+@pytest.mark.parametrize("semantic_context", ["", "   ", None])
+def test_retrieval_tool_requires_semantic_context(semantic_context):
+    with pytest.raises(ValueError, match="semantic_context"):
+        retrieve_study_passages("What happened?", semantic_context)
 
 
 def test_retrieval_finds_school_trip_stop_and_stays_within_budget():
