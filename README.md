@@ -42,10 +42,17 @@ whichever one `challenges/ghost_chains/routes.py` imports:
   (verified over 300 randomised streams) and is the one-line rollback. Also the
   parity reference for later phases.
 - `solution2.py` - Phase 2, the same structural core plus the `ipAddress` /
-  `deviceId` identity layer. Currently live. With no identity fields anywhere in
-  the stream it reproduces `solution.py` score for score, which is what keeps the
-  Phase 1 half of a Phase 2 evaluation intact - `tests/test_ghost_chains_phase_2.py`
-  asserts that against the Phase 1 model directly.
+  `deviceId` identity layer. With no identity fields anywhere in the stream it
+  reproduces `solution.py` score for score, which is what keeps the Phase 1 half
+  of a Phase 2 evaluation intact - `tests/test_ghost_chains_phase_2.py` asserts
+  that against the Phase 1 model directly.
+- `solution3.py` - Phase 3, the same structural core again plus the `amount`
+  value layer. Currently live. With uniform amounts it reproduces `solution2.py`
+  score for score - `tests/test_ghost_chains_phase_3.py` asserts it.
+
+The structural core is duplicated verbatim across the three modules and the parity
+tests pin them together, so a change to it - `W_SHORTCUT`, `GAMMA`, `SQUASH`, any
+`W_*` - has to be made in all three or the parity tests fail.
 
 ## Local setup
 
