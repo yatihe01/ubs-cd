@@ -13,6 +13,7 @@ package and is exposed through a Flask Blueprint.
 
 For Tool Box, submit `https://<host>/tool-box` as the team URL. The evaluator
 appends `/mcp` when discovering the server.
+- `POST /kan-cheong-delivery-driver` - batch Kan Chiong Delivery Driver endpoint
 
 ## Local setup
 
