@@ -95,6 +95,45 @@ def _key_pair_bad_low(number: int, community: int) -> tuple[int, int]:
     return (-int(number == community), -number)
 
 
+def _key_pair_closest(number: int, community: int) -> tuple[int, int, int]:
+    return (int(number == community), -abs(number - community), number)
+
+
+def _key_pair_farthest(number: int, community: int) -> tuple[int, int, int]:
+    return (int(number == community), abs(number - community), number)
+
+
+def _key_parity_odd(number: int, community: int) -> tuple[int, int]:
+    return (number % 2, number)
+
+
+def _key_parity_even(number: int, community: int) -> tuple[int, int]:
+    return (1 - number % 2, number)
+
+
+def _wrap(number: int, community: int) -> int:
+    """Circular distance on a 13-number wheel."""
+    raw = abs(number - community)
+    return min(raw, DECK - raw)
+
+
+def _key_wrap_closest(number: int, community: int) -> tuple[int, int]:
+    return (-_wrap(number, community), number)
+
+
+def _key_wrap_farthest(number: int, community: int) -> tuple[int, int]:
+    return (_wrap(number, community), number)
+
+
+def _key_sum_high(number: int, community: int) -> tuple[int, int]:
+    return ((number + community) % DECK, number)
+
+
+def _key_under_community(number: int, community: int) -> tuple[int, int]:
+    """Highest number that does not exceed the community number wins."""
+    return (int(number <= community), number if number <= community else -number)
+
+
 def _from_key(key: Callable[[int, int], tuple]) -> Compare:
     return lambda left, right, community: _cmp(
         key(left, community), key(right, community)
@@ -113,7 +152,55 @@ HYPOTHESES: dict[str, Compare] = {
     "farthest_low": _from_key(_key_farthest_low),
     "pair_bad_high": _from_key(_key_pair_bad_high),
     "pair_bad_low": _from_key(_key_pair_bad_low),
+    # Wider shapes.  A rule we cannot name is a rule we cannot price, and an
+    # unnamed rule costs a whole 60-hand leg, so the ensemble is deliberately
+    # broader than the shapes seen so far.
+    "pair_closest": _from_key(_key_pair_closest),
+    "pair_farthest": _from_key(_key_pair_farthest),
+    "parity_odd": _from_key(_key_parity_odd),
+    "parity_even": _from_key(_key_parity_even),
+    "wrap_closest": _from_key(_key_wrap_closest),
+    "wrap_farthest": _from_key(_key_wrap_farthest),
+    "sum_high": _from_key(_key_sum_high),
+    "under_community": _from_key(_key_under_community),
 }
+
+
+#: ``RANKS[name][community][number]`` - the sort key, precomputed.  Every hot
+#: path compares two of these instead of re-invoking the hypothesis lambda.
+RANKS: dict[str, tuple] = {}
+
+
+def _build_rank_tables() -> None:
+    keys = {
+        "standard": _key_standard, "pair_low": _key_pair_low,
+        "high": _key_high, "low": _key_low,
+        "closest_high": _key_closest_high, "closest_low": _key_closest_low,
+        "farthest_high": _key_farthest_high, "farthest_low": _key_farthest_low,
+        "pair_bad_high": _key_pair_bad_high, "pair_bad_low": _key_pair_bad_low,
+        "pair_closest": _key_pair_closest, "pair_farthest": _key_pair_farthest,
+        "parity_odd": _key_parity_odd, "parity_even": _key_parity_even,
+        "wrap_closest": _key_wrap_closest, "wrap_farthest": _key_wrap_farthest,
+        "sum_high": _key_sum_high, "under_community": _key_under_community,
+    }
+    for name, key in keys.items():
+        RANKS[name] = tuple(
+            None if board == 0 else tuple(
+                None if number == 0 else key(number, board)
+                for number in range(DECK + 1)
+            )
+            for board in range(DECK + 1)
+        )
+
+
+_build_rank_tables()
+
+
+#: Codename -> hypothesis name, for rules already identified in an earlier
+#: attempt.  The mapping is fixed for the whole event, so pinning one here
+#: turns a 60-hand learning problem into knowledge from the first hand.  Read
+#: ``GET /showdown/rules`` after an attempt to fill this in.
+KNOWN_CODENAMES: dict[str, str] = {}
 
 
 @dataclass(frozen=True)
@@ -135,11 +222,16 @@ class RuleModel:
         self._candidates: set[str] = set(HYPOTHESES)
         self._global_edges: dict[tuple[int, int], list[int]] = {}
         self.conflicts = 0
+        self._pinned = False
 
         # ``standard`` is descriptive in Phase 1 and useful in local tests.  An
         # opaque Phase 2 codename receives no such privileged assumption.
         if codename == "standard":
             self._candidates = {"standard"}
+        known = KNOWN_CODENAMES.get(codename)
+        if known in HYPOTHESES:
+            self._candidates = {known}
+            self._pinned = True
 
     @property
     def candidates(self) -> frozenset[str]:
@@ -147,7 +239,7 @@ class RuleModel:
 
     @property
     def confidence(self) -> float:
-        if self.codename == "standard":
+        if self.codename == "standard" or self._pinned:
             return 1.0
         # Equal private numbers are guaranteed ties under any deterministic
         # rule and therefore do not distinguish one candidate from another.
@@ -254,6 +346,38 @@ class RuleModel:
         result = self._empirical_compare(left, right, community)
         reliability = min(len(self.observations) / 24.0, 0.72)
         return 0.5 + 0.5 * result * reliability
+
+    def outcome_probs(
+        self, left: int, right: int, community: int
+    ) -> tuple[float, float]:
+        """``(P(left beats right), P(tie))`` - the honest posterior.
+
+        ``win_share`` collapses this to a single scalar, which is fine for a
+        heads-up average but loses the distinction between "certainly a tie"
+        and "a coin flip between winning and losing".  Multiway pot-splitting
+        needs the two apart.
+        """
+        if left == right:
+            return 0.0, 1.0
+        exact = self._exact.get((community, left, right))
+        if exact is not None:
+            return (1.0, 0.0) if exact > 0 else ((0.0, 1.0) if exact == 0 else (0.0, 0.0))
+        if self._candidates:
+            wins = ties = 0
+            for name in self._candidates:
+                table = RANKS[name][community]
+                outcome = _cmp(table[left], table[right])
+                wins += outcome > 0
+                ties += outcome == 0
+            total = len(self._candidates)
+            return wins / total, ties / total
+        # No recognised shape left.  Fall back on the empirical ranking, shrunk
+        # towards a coin flip by how much evidence actually backs it.
+        result = self._empirical_compare(left, right, community)
+        reliability = min(len(self.observations) / 24.0, 0.72)
+        if result == 0:
+            return 0.5 * (1.0 - reliability), reliability
+        return 0.5 + 0.5 * result * reliability, 0.0
 
     def strength(self, number: int, community: int | None) -> float:
         communities = (community,) if community in NUMBERS else NUMBERS

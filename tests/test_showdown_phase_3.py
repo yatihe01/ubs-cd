@@ -257,3 +257,53 @@ def test_phase3_fuzz_always_returns_a_legal_move(client):
             assert low <= move["amount"] <= high
         else:
             assert "amount" not in move
+
+
+def test_partial_rule_knowledge_does_not_price_the_nuts_as_a_loser():
+    """Regression: uncertainty must not read as a certain loss.
+
+    ``win_share`` is a posterior probability.  The previous equity engine
+    bucketed it with ``share == 1.0`` / ``share == 0.5`` and let every value
+    in between fall through as a loss, so while several hypotheses were still
+    alive a pair - unbeatable under ``standard`` - scored exactly 0.0 equity
+    and the bot folded it getting 5:1.
+    """
+    truth = phase_2.HYPOTHESES["standard"]
+    rule = phase_2._rule_for("partly-known")
+    for community, left, right in [(5, 9, 2), (11, 3, 7)]:
+        rule.observe(community, left, right, truth(left, right, community))
+
+    assert len(rule.candidates) > 1, "the rule must still be genuinely uncertain"
+    uniform = {number: 1.0 for number in phase_3.NUMBERS}
+    pair = phase_3.multiway_equity(rule, 7, 7, [uniform] * 5)
+    trash = phase_3.multiway_equity(rule, 2, 9, [uniform] * 5)
+
+    assert pair > phase_3.fair_share(5)
+    assert pair > trash
+
+
+def test_an_unrecognised_rule_still_separates_strong_from_weak():
+    """With no hypothesis left, the empirical ranking must still price hands.
+
+    Previously ``_empirical_compare`` returned values that were never exactly
+    1.0, so every holding - best and worst alike - collapsed to ~0 equity for
+    the rest of the leg.
+    """
+    rule = phase_2._rule_for("unrecognised")
+    rule._candidates = set()
+    for left in range(1, 14):
+        for right in range(1, 14):
+            if left != right:
+                rule.observe(7, left, right, 1 if left > right else -1)
+
+    uniform = {number: 1.0 for number in phase_3.NUMBERS}
+    best = phase_3.multiway_equity(rule, 13, 7, [uniform] * 5)
+    worst = phase_3.multiway_equity(rule, 1, 7, [uniform] * 5)
+    assert best > phase_3.fair_share(5) > worst
+
+
+def test_thresholds_scale_with_the_number_of_live_opponents():
+    """A 0.52 share is average heads-up and enormous six-handed."""
+    assert phase_3.fair_share(1) == pytest.approx(0.5)
+    assert phase_3.fair_share(5) == pytest.approx(1 / 6)
+    assert phase_3._relative_floor(5, 0.34) < phase_3._relative_floor(1, 0.34)
