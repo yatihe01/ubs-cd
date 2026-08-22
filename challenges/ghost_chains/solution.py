@@ -38,12 +38,16 @@ class GhostChainsModel:
         current_time = max(self.latest_time or transaction.created_at, transaction.created_at)
         cutoff = current_time - LOOKBACK
         self.transactions = [
-            item for item in self.transactions if item.created_at > cutoff
+            item for item in self.transactions if item.created_at >= cutoff
         ]
         self._rebuild_graph()
-        score = self._score(transaction.from_user, transaction.to_user)
 
-        if transaction.created_at > cutoff:
+        # A late arrival that is already outside the active event-time window
+        # cannot change the rolling graph and therefore has no structural delta.
+        if transaction.created_at < cutoff:
+            score = 0.0
+        else:
+            score = self._score(transaction.from_user, transaction.to_user)
             self.transactions.append(transaction)
         self.scores[transaction.tx_id] = (transaction, score)
         self.latest_time = current_time
@@ -55,13 +59,70 @@ class GhostChainsModel:
             self.graph[transaction.from_user].add(transaction.to_user)
 
     def _score(self, source: str, target: str) -> float:
+        # A repeated edge does not change the Phase 1 topology. Transaction
+        # frequency may become a separate signal in a later phase, but it is
+        # deliberately not treated as a structural delta here.
+        if target in self.graph.get(source, ()):
+            return 0.0
+
+        if source == target:
+            return 0.3
+
+        ancestors = _reverse_distances(self.graph, source)
+        descendants = _shortest_distances(self.graph, target)
+        distance_cache: dict[str, dict[str, int]] = {}
+
+        new_reachability = 0.0
+        shortened_paths = 0.0
+        alternative_routes = 0.0
+
+        # Any route which uses the candidate edge has the shape
+        # ancestor -> source -> target -> descendant. Compare that candidate
+        # route with the graph before insertion to measure the edge's marginal
+        # structural effect rather than matching one named pattern.
+        for ancestor, distance_to_source in ancestors.items():
+            old_distances = distance_cache.setdefault(
+                ancestor, _shortest_distances(self.graph, ancestor)
+            )
+            for descendant, distance_from_target in descendants.items():
+                if ancestor == descendant:
+                    # Recurring paths are scored explicitly below; shortest
+                    # path distance to oneself is always zero.
+                    continue
+
+                candidate_distance = (
+                    distance_to_source + 1 + distance_from_target
+                )
+                old_distance = old_distances.get(descendant)
+
+                if old_distance is None:
+                    # Ignore the candidate edge's inevitable direct path so
+                    # an isolated transfer remains the lowest-risk baseline.
+                    if ancestor != source or descendant != target:
+                        new_reachability += 1.0 / candidate_distance
+                elif candidate_distance < old_distance:
+                    shortened_paths += (
+                        old_distance - candidate_distance
+                    ) / old_distance
+                elif candidate_distance == old_distance:
+                    # A second route of equal length is the convergence signal
+                    # shown in the Phase 1 examples.
+                    alternative_routes += 1.0 / candidate_distance
+
         return_paths = _path_count(self.graph, target, source)
-        convergence_paths = sum(
-            _path_count(self.graph, ancestor, target)
-            for ancestor in _ancestors(self.graph, source)
-            if ancestor != source
+        score = (
+            0.14 * min(new_reachability, 2.5)
+            + 0.22 * min(shortened_paths, 2.0)
+            + 0.36 * min(alternative_routes, 1.5)
         )
-        score = 0.38 * min(return_paths, 2) + 0.16 * min(convergence_paths, 4)
+
+        if return_paths:
+            score += 0.42 + 0.1 * min(return_paths - 1, 3)
+            # Closing another loop into an already cyclic destination is the
+            # multi-loop case: two independent return routes converge there.
+            if _path_count(self.graph, target, target):
+                score += 0.22
+
         return round(min(score, 1.0), 6)
 
 
@@ -108,20 +169,25 @@ def _path_count(graph: dict[str, set[str]], start: str, end: str) -> int:
     return count
 
 
-def _ancestors(graph: dict[str, set[str]], node: str) -> set[str]:
+def _shortest_distances(
+    graph: dict[str, set[str]], start: str
+) -> dict[str, int]:
+    distances = {start: 0}
+    pending = [start]
+    for node in pending:
+        next_distance = distances[node] + 1
+        for neighbour in graph.get(node, ()):
+            if neighbour not in distances:
+                distances[neighbour] = next_distance
+                pending.append(neighbour)
+    return distances
+
+
+def _reverse_distances(
+    graph: dict[str, set[str]], node: str
+) -> dict[str, int]:
     reverse: defaultdict[str, set[str]] = defaultdict(set)
     for source, targets in graph.items():
         for target in targets:
             reverse[target].add(source)
-    found: set[str] = set()
-    pending = list(reverse.get(node, ()))
-    while pending:
-        ancestor = pending.pop()
-        if ancestor not in found:
-            found.add(ancestor)
-            pending.extend(reverse.get(ancestor, ()))
-    return found
-
-
-def _common_ancestor_count(graph: dict[str, set[str]], source: str, target: str) -> int:
-    return len(_ancestors(graph, source) & _ancestors(graph, target))
+    return _shortest_distances(reverse, node)
