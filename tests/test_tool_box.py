@@ -41,10 +41,16 @@ def make_shape(shape: str, *, outline: bool = False, data_uri: bool = False) -> 
 
 
 def test_name_is_valid():
-    name = get_name()
+    name = get_name("What is your name?")
 
     assert 3 <= len(name) <= 30
     assert all(character.isalnum() or character in " _-'" for character in name)
+
+
+@pytest.mark.parametrize("question", ["", "   ", None])
+def test_name_rejects_an_empty_question(question):
+    with pytest.raises(ValueError, match="non-empty"):
+        get_name(question)
 
 
 def test_agent_sees_purpose_specific_tool_schemas():
@@ -57,6 +63,7 @@ def test_agent_sees_purpose_specific_tool_schemas():
         "recognize_shape",
     ]
     assert "complete final answer" in tools["answer_name_question"].description
+    assert tools["answer_name_question"].parameters["required"] == ["question"]
     assert tools["evaluate_expression"].parameters["required"] == ["expression"]
     assert "multiple operators" in tools["calculate"].description
 

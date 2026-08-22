@@ -7,8 +7,11 @@ from typing import Literal
 from challenges.tool_box.shape_recognition import identify_shape
 
 
-def get_name() -> str:
-    """Return the exact final answer to a question asking for your name."""
+def get_name(question: str) -> str:
+    """Return the exact final answer to the supplied name question."""
+
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("question must be a non-empty string")
 
     return "Nova"
 
