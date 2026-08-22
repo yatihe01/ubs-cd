@@ -60,6 +60,7 @@ STACK_OFF_P = 0.82
 EXPLORE_MIN_CONFIDENCE = 0.45
 EXPLORE_CALL_CAP = 6
 EXPLORE_HANDS = 14
+EXPLORE_STACK_SHARE = 0.05
 # Where a read stops being provisional. Bet sizing rides this continuously, so
 # the first hand past the exploring threshold is not played at full size.
 CONFIDENT_AT = 0.85
@@ -1083,21 +1084,29 @@ def _bet_size(state: TurnState, max_add: int) -> int | None:
 def _explore(state: TurnState, equity: float, live: int) -> dict:
     """Cheap, information-buying play while the rule is still unpriced.
 
-    Showdowns between the other five seats teach us for free, so this never
-    needs to buy information at a bad price - only at a trivial one.
+    Every price here is checked against a hard chip budget, and that budget is
+    the whole point.  Good pot odds on an unknown rule are not an opportunity:
+    a shove war can offer a pot-odds price better than our fair share while
+    asking for the entire stack, and paying it puts the leg on a number we have
+    no way to read.  The other five seats show each other down for free, so
+    there is never anything here worth buying at a real price.
     """
     if state.to_call <= 0:
         if "check" in state.legal:
             return {"action": "check"}
         return state.fallback()
-    fair_share = 1.0 / (live + 1)
-    price = state.to_call / max(1, state.pot + state.to_call)
-    affordable = (
-        state.hand_number <= EXPLORE_HANDS
-        and state.to_call <= min(EXPLORE_CALL_CAP, state.big_blind)
+    budget = max(
+        EXPLORE_CALL_CAP,
+        int(EXPLORE_STACK_SHARE * state.stack_at_hand_start),
     )
-    if "call" in state.legal and (affordable or price <= max(equity, fair_share)):
-        return {"action": "call"}
+    if "call" in state.legal and state.to_call <= budget:
+        cheap = (
+            state.hand_number <= EXPLORE_HANDS
+            and state.to_call <= max(EXPLORE_CALL_CAP, state.big_blind)
+        )
+        price = state.to_call / max(1, state.pot + state.to_call)
+        if cheap or price <= max(equity, 1.0 / (live + 1)):
+            return {"action": "call"}
     if "fold" in state.legal:
         return {"action": "fold"}
     return state.fallback()
