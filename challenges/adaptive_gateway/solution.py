@@ -1,6 +1,7 @@
 import base64
 import binascii
 import json
+import math
 
 
 PRIORITY_LEVELS = {
@@ -42,4 +43,34 @@ def transform(adapt_input: dict) -> dict:
             if isinstance(raw_priority, str)
             else None
         ),
+    }
+
+
+def calculate_slo(heartbeats: object, slo_query: object) -> dict:
+    if not isinstance(heartbeats, list) or not isinstance(slo_query, dict):
+        return {"availability": 0.0, "p95LatencyMs": 0}
+
+    service = slo_query.get("service")
+    since = slo_query.get("since")
+    if not isinstance(service, str) or not isinstance(since, (int, float)):
+        return {"availability": 0.0, "p95LatencyMs": 0}
+
+    matching = [
+        heartbeat
+        for heartbeat in heartbeats
+        if isinstance(heartbeat, dict)
+        and heartbeat.get("service") == service
+        and isinstance(heartbeat.get("timestamp"), (int, float))
+        and heartbeat["timestamp"] >= since
+        and isinstance(heartbeat.get("latencyMs"), (int, float))
+    ]
+    if not matching:
+        return {"availability": 0.0, "p95LatencyMs": 0}
+
+    latencies = sorted(heartbeat["latencyMs"] for heartbeat in matching)
+    p95_index = max(0, math.ceil(len(latencies) * 0.95) - 1)
+    available = sum(heartbeat.get("status") == "OK" for heartbeat in matching)
+    return {
+        "availability": round(available / len(matching), 6),
+        "p95LatencyMs": latencies[p95_index],
     }
