@@ -372,7 +372,9 @@ def client():
 def test_identity_fields_flow_through_the_endpoint(client):
     payload = {
         "transactions": [
-            {"txId": "i0", "fromUserId": M, "toUserId": A, "amount": 370.0,
+            # Uniform amounts: this test is about identity reaching the model, and
+            # from Phase 3 on a varying amount is itself a scored signal.
+            {"txId": "i0", "fromUserId": M, "toUserId": A, "amount": 100.0,
              "createdAt": iso(BASE), "deviceId": DEV_A},
             {"txId": "i1", "fromUserId": A, "toUserId": C, "amount": 100.0,
              "createdAt": iso(BASE + timedelta(minutes=1)), "deviceId": DEV_A},

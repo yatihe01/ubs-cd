@@ -1,10 +1,10 @@
 from flask import jsonify, request
 
 from challenges.ghost_chains import blueprint
-# Phase 2 evaluation re-tests Phase 1, so the live model is the Phase 2 one.
-# `solution.py` is kept untouched as the measured 380/400 Phase 1 baseline to
-# fall back to and to diff against.
-from challenges.ghost_chains.solution2 import GhostChainsModel, make_transaction
+# Each phase re-tests every earlier one, so the live model is the newest phase.
+# `solution.py` and `solution2.py` are kept untouched as the measured Phase 1 and
+# Phase 2 baselines to fall back to and to diff against.
+from challenges.ghost_chains.solution3 import GhostChainsModel, make_transaction
 
 
 model = GhostChainsModel()
