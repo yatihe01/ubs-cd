@@ -25,13 +25,10 @@ DECK = phase_2.DECK
 NUMBERS = phase_2.NUMBERS
 TARGET_DELTA = 10
 
-EXPLORE_MIN_CONFIDENCE = phase_2.EXPLORE_MIN_CONFIDENCE
-EXPLORE_CALL_CAP = 5
 POT_FRACTIONS = (0.40, 0.65, 0.90)
 
 VALUE_BET_MIN = 0.52
 VALUE_RAISE_MIN = 0.58
-NUTS_EQUITY = 0.78
 STACK_OFF_EQUITY = 0.70
 MAX_OPPONENTS = 32
 
@@ -80,6 +77,9 @@ class TurnState(phase_1.TurnState):
         self.button_seat = body.get("button_seat")
         self.small_blind = max(0, phase_1._as_int(body.get("small_blind"), 1))
         self.big_blind = max(0, phase_1._as_int(body.get("big_blind"), 2))
+        self.starting_stack = max(
+            1, phase_1._as_int(body.get("starting_stack"), 200)
+        )
 
         self.players = [
             player
@@ -308,43 +308,85 @@ def _future_blind_cost(state: TurnState) -> int:
 
 
 def _required_delta(state: TurnState) -> int:
-    other_deltas = [
-        phase_1._as_int(player.get("chip_delta")) for player in state.opponents
-    ]
-    return max(TARGET_DELTA, max(other_deltas, default=-10**9) + 1)
+    # Stack is live during the hand whereas chip_delta is frozen at its start.
+    leader_stack = max(
+        (phase_1._as_int(player.get("stack")) for player in state.opponents),
+        default=0,
+    )
+    required_stack = max(state.starting_stack + TARGET_DELTA, leader_stack + 1)
+    return required_stack - state.starting_stack
 
 
 def _endgame_locked(state: TurnState) -> bool:
-    """Whether folding out preserves +10 and a strict table lead.
+    """Whether no opponent can catch us without receiving another voluntary chip.
 
-    Current committed chips are treated pessimistically twice: they leave our
-    delta and may all land with the current leader.  Future blinds are handled
-    the same way.  This does not pretend other players stop playing each other,
-    but avoids the common error of banking +10 while another seat is already
-    further ahead.
+    With hands left, the worst case is that every opposing stack consolidates
+    into one seat.  Therefore owning strictly more than the rest of the table
+    plus the current pot is a mathematical rank-one lock.  This is exactly the
+    situation the failed replay reached at roughly +450 before giving it back.
+    On the final hand opponents no longer have time to consolidate, so only the
+    largest current stack plus the pot can catch us.
     """
     blind_cost = _future_blind_cost(state)
-    at_risk = state.committed_this_hand + blind_cost
-    guaranteed = state.chip_delta - at_risk
-    leader = max(
-        (phase_1._as_int(player.get("chip_delta")) for player in state.opponents),
-        default=-10**9,
+    guaranteed_stack = max(0, state.stack - blind_cost)
+    guaranteed_delta = guaranteed_stack - state.starting_stack
+    opponent_stacks = [
+        max(0, phase_1._as_int(player.get("stack")))
+        for player in state.opponents
+    ]
+    hands_left = max(state.total_hands - state.hand_number, 0)
+    if hands_left == 0:
+        opponent_ceiling = max(opponent_stacks, default=0) + state.pot
+    else:
+        opponent_ceiling = sum(opponent_stacks) + state.pot + blind_cost
+    return (
+        guaranteed_delta >= TARGET_DELTA
+        and guaranteed_stack > opponent_ceiling
     )
-    return guaranteed >= TARGET_DELTA and guaranteed > leader + at_risk
+
+
+def _protect_late_lead(state: TurnState) -> bool:
+    """Practical rank protection in the last orbit.
+
+    Full consolidation is possible in theory but increasingly unlikely with
+    only a few deals left.  Once our fold-out stack is already above the live
+    leader and clears +10, taking another voluntary confrontation has much
+    more downside than upside for the actual scoring rule.
+    """
+    hands_left = max(state.total_hands - state.hand_number, 0)
+    if hands_left > max(3, len(state.active_players)):
+        return False
+    blind_cost = _future_blind_cost(state)
+    guaranteed_stack = max(0, state.stack - blind_cost)
+    leader = max(
+        (max(0, phase_1._as_int(player.get("stack"))) for player in state.opponents),
+        default=0,
+    )
+    return (
+        guaranteed_stack - state.starting_stack >= TARGET_DELTA
+        and guaranteed_stack > leader + state.pot + blind_cost
+    )
 
 
 def _race_pressure(state: TurnState) -> float:
     """Small, late adjustment when merely surviving cannot top the table."""
-    deficit = max(0, _required_delta(state) - state.chip_delta)
+    live_delta = state.stack - state.starting_stack
+    deficit = max(0, _required_delta(state) - live_delta)
     hands_left = max(1, state.total_hands - state.hand_number + 1)
     urgency = 1.0 - min(hands_left / max(state.total_hands, 1), 1.0)
-    return min(0.12, deficit / max(state.stack_at_hand_start, 1) * urgency)
+    return min(0.22, deficit / max(state.starting_stack, 1) * urgency)
 
 
 def _commit_cap(state: TurnState, equity: float, pressure: float) -> int:
-    if equity >= NUTS_EQUITY:
+    strategic_equity = min(1.0, equity + pressure)
+    if strategic_equity >= 0.70:
         return state.stack
-    fraction = 0.48 if equity + pressure >= 0.65 else 0.25
+    if strategic_equity >= 0.60:
+        fraction = 0.68
+    elif strategic_equity >= 0.48:
+        fraction = 0.42
+    else:
+        fraction = 0.24
     budget = int(state.stack_at_hand_start * fraction) - state.committed_this_hand
     return max(0, min(budget, state.stack))
 
@@ -450,19 +492,6 @@ def _best_raise(
     return max(choices, default=None)
 
 
-def _explore(state: TurnState) -> dict:
-    if state.to_call <= 0 and "check" in state.legal:
-        return {"action": "check"}
-    # A six-way showdown teaches many pairwise constraints, but do not pay a
-    # heads-up-sized tuition when several live ranges can still beat us.
-    cap = max(2, EXPLORE_CALL_CAP - max(0, len(state.live_opponents) - 2))
-    if state.to_call <= cap and "call" in state.legal:
-        return {"action": "call"}
-    if "fold" in state.legal:
-        return {"action": "fold"}
-    return state.fallback()
-
-
 def decide(state: TurnState) -> dict:
     rule = phase_2._rule_for(state.table_rule)
     # RuleModel is shared with Phase 2, so use its lock while adding evidence.
@@ -480,10 +509,15 @@ def decide(state: TurnState) -> dict:
 
     if state.number not in NUMBERS or not state.legal:
         return state.fallback()
-    if _endgame_locked(state) and state.to_call > 0:
-        return {"action": "fold"} if "fold" in state.legal else state.fallback()
-    if rule.confidence < EXPLORE_MIN_CONFIDENCE:
-        return _explore(state)
+    locked = _endgame_locked(state) or _protect_late_lead(state)
+    if locked:
+        # Rank, not chip EV, is the scoring objective. Once first place is
+        # protected, never reopen the door with a "value" bet.
+        if state.to_call <= 0 and "check" in state.legal:
+            return {"action": "check"}
+        if "fold" in state.legal:
+            return {"action": "fold"}
+        return state.fallback()
 
     entries = [
         (player, _opponent_for(player), _infer_range(
@@ -494,17 +528,16 @@ def decide(state: TurnState) -> dict:
     ranges = [weights for _, _, weights in entries]
     equity = multiway_equity(rule, state.number, state.community, ranges)
     pressure = _race_pressure(state)
+    strategic_equity = min(1.0, equity + pressure)
     max_add = _commit_cap(state, equity, pressure)
-    locked = _endgame_locked(state)
 
     if state.to_call <= 0:
         check_ev = equity * state.pot
-        value_floor = NUTS_EQUITY if locked else VALUE_BET_MIN - pressure
+        value_floor = VALUE_BET_MIN - pressure
         value = equity >= value_floor
         # Bluffing through several independent opponents is rarely profitable.
         bluff = (
-            not locked
-            and len(entries) <= 2
+            len(entries) <= 2
             and equity <= 0.10 + pressure
             and all(model.bluff_budget_left for _, model, _ in entries)
         )
@@ -523,18 +556,19 @@ def decide(state: TurnState) -> dict:
             return {"action": "check"}
         return state.fallback()
 
-    call_ev = equity * (state.pot + state.to_call) - state.to_call
+    raw_call_ev = equity * (state.pot + state.to_call) - state.to_call
+    call_ev = strategic_equity * (state.pot + state.to_call) - state.to_call
     value = equity >= VALUE_RAISE_MIN - pressure
     if "raise" in state.legal and value and entries:
         best = _best_raise(state, rule, entries, max_add)
-        if best and best[0] > max(call_ev, 0.0):
+        if best and best[0] > max(raw_call_ev, 0.0):
             for _, model, _ in entries:
                 model.our_aggressive += 1
             return {"action": "raise", "amount": best[1]}
 
     risk_premium = 0.015 * max(0, len(entries) - 1)
     thin_stack_off = (
-        equity + pressure < STACK_OFF_EQUITY
+        strategic_equity < STACK_OFF_EQUITY
         and state.stack > 0
         and state.to_call >= 0.9 * state.stack
         and state.hand_number < state.total_hands
