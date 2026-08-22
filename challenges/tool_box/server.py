@@ -43,10 +43,13 @@ mcp.tool(
     retrieve_study_passages,
     description=(
         "Use for School Days factual-recall questions and for finding the STOP_XX "
-        "node associated with a named school-trip place. Pass the complete question "
-        "once and answer from the returned source passages. Passages include their "
-        "source title and section and are ranked most relevant first; the passages are "
-        "evidence, not a prewritten final answer."
+        "node associated with a named school-trip place. Pass the complete question. "
+        "Before calling, use your semantic understanding to rewrite the intended "
+        "concept as concise likely corpus terminology in semantic_context, including "
+        "synonyms absent from the question (for example, air-scrubbing equipment "
+        "breaking down means oxygen scrubber failure, ventilation fault, malfunction). "
+        "Passages include source title and section and are ranked most relevant first; "
+        "answer from their evidence."
     ),
 )
 mcp.tool(

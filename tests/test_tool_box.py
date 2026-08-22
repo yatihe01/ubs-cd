@@ -68,7 +68,10 @@ def test_agent_sees_purpose_specific_tool_schemas():
     assert tools["answer_name_question"].parameters["required"] == ["question"]
     assert tools["evaluate_expression"].parameters["required"] == ["expression"]
     assert "multiple operators" in tools["calculate"].description
-    assert tools["retrieve_study_passages"].parameters["required"] == ["question"]
+    assert tools["retrieve_study_passages"].parameters["required"] == [
+        "question",
+        "semantic_context",
+    ]
     assert tools["choose_next_node"].parameters["required"] == [
         "map_id",
         "current_node",
