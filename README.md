@@ -13,6 +13,8 @@ package and is exposed through a Flask Blueprint.
 - `GET /showdown/health` - SHOWDOWN warm-up probe
 - `/mcp` - active Tool Box challenge MCP endpoint
 - `POST /kan-cheong-delivery-driver` - batch Kan Chiong Delivery Driver endpoint
+- `GET /ghost-chains/health`, `POST /ghost-chains/reset`,
+  `POST /ghost-chains/transactions` - Ghost Chains risk scoring
 
 For Tool Box, select the registered `https://<host>` team URL. The evaluator
 appends `/mcp` when discovering the server.
@@ -24,6 +26,20 @@ Register `https://<host>/showdown` as the bot URL: the coordinator appends
 `challenges/showdown/phase_1.py`; Phase 2 requests are dispatched to
 `challenges/showdown/phase_2.py`, which learns opaque table rules by codename
 across the four 40-hand legs and retries.
+
+## Ghost Chains
+
+Register `https://<host>` with the coordinator; the evaluator appends
+`/ghost-chains/...` itself. Each phase is a separate module and the live model is
+whichever one `challenges/ghost_chains/routes.py` imports:
+
+- `solution.py` - Phase 1, structural signal only. Measured 380/400; kept frozen
+  as the fallback and as the parity reference for later phases.
+- `solution2.py` - Phase 2, the same structural core plus the `ipAddress` /
+  `deviceId` identity layer. Currently live. With no identity fields anywhere in
+  the stream it reproduces `solution.py` score for score, which is what keeps the
+  Phase 1 half of a Phase 2 evaluation intact - `tests/test_ghost_chains_phase_2.py`
+  asserts that against the Phase 1 model directly.
 
 ## Local setup
 
