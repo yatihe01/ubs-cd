@@ -39,7 +39,7 @@ def test_adaptive_gateway_returns_slo_output(client):
     assert response.status_code == 200
     assert response.get_json()["sloOutput"] == {
         "availability": 0.5,
-        "p95LatencyMs": 177,
+        "p95LatencyMs": 180,
     }
 
 

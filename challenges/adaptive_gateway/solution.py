@@ -87,18 +87,9 @@ def calculate_slo(heartbeats: object, slo_query: object) -> dict:
     if not latencies:
         p95_latency = 0
     else:
-        rank = (len(latencies) - 1) * 0.95
-        lower_index = math.floor(rank)
-        upper_index = math.ceil(rank)
-        if lower_index == upper_index:
-            p95_latency = latencies[lower_index]
-        else:
-            fraction = rank - lower_index
-            p95_latency = latencies[lower_index] + fraction * (
-                latencies[upper_index] - latencies[lower_index]
-            )
-            p95_latency = round(p95_latency, 6)
-        if isinstance(p95_latency, float) and p95_latency.is_integer():
+        p95_index = max(0, math.ceil(len(latencies) * 0.95) - 1)
+        p95_latency = latencies[p95_index]
+        if isinstance(p95_latency, float):
             p95_latency = int(p95_latency)
 
     return {"availability": availability, "p95LatencyMs": p95_latency}
