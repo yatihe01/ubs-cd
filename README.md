@@ -25,7 +25,9 @@ Register `https://<host>/showdown` as the bot URL: the coordinator appends
 `/move` and `/health` itself. Phase 1 requests use
 `challenges/showdown/phase_1.py`; Phase 2 requests are dispatched to
 `challenges/showdown/phase_2.py`, which learns opaque table rules by codename
-across the four 40-hand legs and retries.
+across the four 40-hand legs and retries. Phase 3 requests use
+`challenges/showdown/phase_3.py`; it shares that rule knowledge while tracking
+five distinct opponent ranges and evaluating exact multiway pot share.
 
 ## Ghost Chains
 
