@@ -11,6 +11,7 @@ package and is exposed through a Flask Blueprint.
 - `POST /adaptive-gateway/solve` - permanent Adaptive API Gateway endpoint
 - `POST /showdown/move` - SHOWDOWN bot, one move per call
 - `GET /showdown/health` - SHOWDOWN warm-up probe
+- `GET /showdown/rules` - what the bot has learned about each table-rule codename
 - `/mcp` - active Tool Box challenge MCP endpoint
 - `POST /kan-cheong-delivery-driver` - batch Kan Chiong Delivery Driver endpoint
 - `GET /ghost-chains/health`, `POST /ghost-chains/reset`,
@@ -22,12 +23,38 @@ appends `/mcp` when discovering the server.
 ## SHOWDOWN
 
 Register `https://<host>/showdown` as the bot URL: the coordinator appends
-`/move` and `/health` itself. Phase 1 requests use
-`challenges/showdown/phase_1.py`; Phase 2 requests are dispatched to
-`challenges/showdown/phase_2.py`, which learns opaque table rules by codename
-across the four 40-hand legs and retries. Phase 3 requests use
-`challenges/showdown/phase_3.py`; it shares that rule knowledge while tracking
-five distinct opponent ranges and evaluating exact multiway pot share.
+`/move` and `/health` itself. `phase_1.handle_move` dispatches on the `phase`
+field in the request body, so one registered URL serves every phase.
+
+- `phase_1.py` - heads-up, 100 hands, `table_rule` is always `standard`.
+- `phase_2.py` - four 40-hand legs. Owns `RuleModel`: the ensemble of rule
+  hypotheses, the per-codename evidence, and `outcome_probs`, which reports a
+  comparison as `(P(win), P(tie))` rather than one scalar.
+- `phase_3.py` - six seats, four 60-hand legs, must *top the table*. Owns the
+  multiway equity engine and the `Profile` that tunes the decision layer.
+- `phase_4.py` - knockout against other teams, up to seven seats, 200 hands.
+  Reuses Phase 3's decision layer through a survival-weighted `Profile`:
+  the objective is clearing the cut, not finishing first.
+
+### Rule knowledge
+
+The codename to ruleset mapping is fixed for the whole event and shared by
+Phases 2, 3 and 4, so a rule identified once is worth pinning permanently.
+After an attempt, read `GET /showdown/rules`; when a codename has resolved to
+a single candidate, add it to `phase_2.KNOWN_CODENAMES` and every later
+attempt starts from certainty instead of relearning during the leg.
+
+### Equity
+
+`multiway_equity` averages equity *across surviving rule hypotheses*, not
+across per-pair win probabilities. The table rule is one unknown truth rather
+than fresh noise per opponent, so the two are not interchangeable: the earlier
+implementation averaged `win_share` per pair and then bucketed it with
+`share == 1.0` / `== 0.5`, which silently scored every uncertain comparison as
+a certain loss. While more than one hypothesis was alive that priced a pair -
+unbeatable under `standard` - at exactly 0.0 equity, and the bot folded it
+getting 5:1. `tests/test_showdown_phase_3.py` pins both that case and the
+unrecognised-rule fallback.
 
 ## Ghost Chains
 

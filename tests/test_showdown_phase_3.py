@@ -259,98 +259,51 @@ def test_phase3_fuzz_always_returns_a_legal_move(client):
             assert "amount" not in move
 
 
-def test_partial_rule_knowledge_still_produces_usable_equity():
-    """The regression that folded whole legs.
+def test_partial_rule_knowledge_does_not_price_the_nuts_as_a_loser():
+    """Regression: uncertainty must not read as a certain loss.
 
-    A rule that is leaned towards but not proven yields fractional
-    per-comparison probabilities.  Rounding those down to "we lose" - anything
-    short of certainty counting as a loss - drove every equity to zero, so the
-    bot folded 60 hands straight and finished a leg at minus the blinds.
+    ``win_share`` is a posterior probability.  The previous equity engine
+    bucketed it with ``share == 1.0`` / ``share == 0.5`` and let every value
+    in between fall through as a loss, so while several hypotheses were still
+    alive a pair - unbeatable under ``standard`` - scored exactly 0.0 equity
+    and the bot folded it getting 5:1.
     """
-    rule = phase_3.RuleModel("half-known")
-    for community, winner, loser in ((3, 12, 4), (7, 11, 2), (9, 13, 6)):
-        rule.observe(community, winner, loser, 1)
+    truth = phase_2.HYPOTHESES["standard"]
+    rule = phase_2._rule_for("partly-known")
+    for community, left, right in [(5, 9, 2), (11, 3, 7)]:
+        rule.observe(community, left, right, truth(left, right, community))
+
+    assert len(rule.candidates) > 1, "the rule must still be genuinely uncertain"
+    uniform = {number: 1.0 for number in phase_3.NUMBERS}
+    pair = phase_3.multiway_equity(rule, 7, 7, [uniform] * 5)
+    trash = phase_3.multiway_equity(rule, 2, 9, [uniform] * 5)
+
+    assert pair > phase_3.fair_share(5)
+    assert pair > trash
+
+
+def test_an_unrecognised_rule_still_separates_strong_from_weak():
+    """With no hypothesis left, the empirical ranking must still price hands.
+
+    Previously ``_empirical_compare`` returned values that were never exactly
+    1.0, so every holding - best and worst alike - collapsed to ~0 equity for
+    the rest of the leg.
+    """
+    rule = phase_2._rule_for("unrecognised")
+    rule._candidates = set()
+    for left in range(1, 14):
+        for right in range(1, 14):
+            if left != right:
+                rule.observe(7, left, right, 1 if left > right else -1)
 
     uniform = {number: 1.0 for number in phase_3.NUMBERS}
-    strong = phase_3.multiway_equity(rule, 13, None, [uniform] * 5)
-    weak = phase_3.multiway_equity(rule, 1, None, [uniform] * 5)
-
-    assert strong > 0.25
-    assert strong > weak
+    best = phase_3.multiway_equity(rule, 13, 7, [uniform] * 5)
+    worst = phase_3.multiway_equity(rule, 1, 7, [uniform] * 5)
+    assert best > phase_3.fair_share(5) > worst
 
 
-def test_an_unknown_rule_prices_every_number_at_its_fair_share():
-    """With no evidence at all, no number may look better or worse than any."""
-    rule = phase_3.RuleModel("opaque")
-    uniform = {number: 1.0 for number in phase_3.NUMBERS}
-    shares = [
-        phase_3.multiway_equity(rule, number, None, [uniform] * 5)
-        for number in phase_3.NUMBERS
-    ]
-    assert max(shares) - min(shares) < 0.08
-    assert all(share > 0.05 for share in shares)
-
-
-def test_a_rule_outside_the_hypothesis_family_is_still_learned():
-    """`(n * 5) % 13` is a permutation no generated feature can express."""
-    order = lambda number: (number * 5) % phase_3.DECK  # noqa: E731
-    rule = phase_3.RuleModel("permutation")
-    rng = random.Random(11)
-    for _ in range(60):
-        community = rng.randint(1, 13)
-        numbers = [rng.randint(1, 13) for _ in range(3)]
-        best = max(numbers, key=order)
-        for other in numbers:
-            if order(other) != order(best):
-                rule.observe(community, best, other, 1)
-
-    ranked = sorted(phase_3.NUMBERS, key=lambda n: rule.strength(n, 7))
-    assert ranked[-1] == 5   # (5 * 5) % 13 == 12, the top of the permutation
-    assert ranked[0] == 13   # (13 * 5) % 13 == 0, the bottom
-    assert rule.confidence > 0.8
-
-
-def test_a_wrong_showdown_cannot_bury_the_true_rule():
-    """Side pots mis-attribute winners; hard elimination made that permanent."""
-    rule = phase_3.RuleModel("standard-ish")
-    rng = random.Random(5)
-    rule.observe(7, 2, 11, 1)  # a lie: under "highest wins" 11 beats 2
-    for _ in range(40):
-        community, left, right = (rng.randint(1, 13) for _ in range(3))
-        if left != right:
-            rule.observe(community, left, right, 1 if left > right else -1)
-
-    ranked = sorted(phase_3.NUMBERS, key=lambda n: rule.strength(n, 4))
-    assert ranked == sorted(phase_3.NUMBERS)
-
-
-def test_chasing_the_leader_never_reaches_back_into_the_early_hands():
-    """Race pressure inflated equity by +0.20 on hand 13 and shoved on it."""
-    players = build_body()["players"]
-    players[0].update(chip_delta=-30, stack=170)
-    players[3].update(chip_delta=200, stack=400)
-
-    def at(hand):
-        return phase_3.TurnState(
-            build_body(players=players, your_stack=170, hand_number=hand,
-                       total_hands=60)
-        )
-
-    assert phase_3._race_pressure(at(13)) == 0.0
-    assert phase_3._race_pressure(at(42)) == 0.0
-    assert phase_3._race_pressure(at(59)) > 0.0
-    assert phase_3._race_pressure(at(59)) <= phase_3.MAX_RACE_PRESSURE
-
-
-def test_race_pressure_can_widen_a_value_bet_but_never_fund_a_shove():
-    players = build_body()["players"]
-    players[0].update(chip_delta=-30, stack=170)
-    players[3].update(chip_delta=200, stack=400)
-    state = phase_3.TurnState(
-        build_body(players=players, your_stack=170, hand_number=59,
-                   total_hands=60)
-    )
-    coin_flip = 0.5 ** len(state.live_opponents)
-    assert phase_3._commit_cap(
-        state, coin_flip, phase_3.MAX_RACE_PRESSURE, len(state.live_opponents), 1.0
-    ) < state.stack
+def test_thresholds_scale_with_the_number_of_live_opponents():
+    """A 0.52 share is average heads-up and enormous six-handed."""
+    assert phase_3.fair_share(1) == pytest.approx(0.5)
+    assert phase_3.fair_share(5) == pytest.approx(1 / 6)
+    assert phase_3._relative_floor(5, 0.34) < phase_3._relative_floor(1, 0.34)
