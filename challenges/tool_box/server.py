@@ -44,8 +44,9 @@ mcp.tool(
     description=(
         "Use for School Days factual-recall questions and for finding the STOP_XX "
         "node associated with a named school-trip place. Pass the complete question "
-        "once and answer from the returned source passages; the passages are evidence, "
-        "not a prewritten final answer."
+        "once and answer from the returned source passages. Passages include their "
+        "source title and section and are ranked most relevant first; the passages are "
+        "evidence, not a prewritten final answer."
     ),
 )
 mcp.tool(

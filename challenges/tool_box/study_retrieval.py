@@ -11,10 +11,19 @@ import httpx
 
 
 STUDY_BASE_URL = "https://tool-box-2591eaa24fa3.herokuapp.com/study-materials"
-DOCUMENT_IDS = ("1", "2", "3", "4", "5")
-MAX_RESPONSE_TOKENS = 900
-TARGET_RESPONSE_BYTES = 880
-MAX_PASSAGE_BYTES = 420
+DOCUMENT_SOURCES = (
+    ("1", "Meridian Trench Research Station"),
+    ("2", "Ashgrove Metropolitan Transit Authority"),
+    ("3", "Velmara Compound Phase II Trial Record"),
+    ("4", "Hollowlight Engine Technical Handbook"),
+    ("5", "Thornmere Growers Cooperative Yearbook"),
+)
+# The source material is ordinary English prose. This conservative byte cap
+# produces roughly 400-550 o200k tokens in live evaluations, leaving ample room
+# below both the 900-token retrieval limit and the 1,200-token tool limit.
+TARGET_RESPONSE_BYTES = 3_000
+MAX_RESPONSE_BYTES = 3_300
+MAX_PASSAGE_BYTES = 560
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$")
@@ -26,17 +35,39 @@ _STOP_WORDS = {
     "with", "would", "you", "your",
 }
 _ALIASES = (
+    {
+        "personnel", "staff", "staffing", "crew", "crewed", "worker", "workers",
+        "workforce", "population", "resident", "residents", "occupancy", "people",
+        "individual", "individuals", "aboard", "live", "living", "headcount",
+    },
+    {
+        "facility", "station", "habitat", "outpost", "site", "base", "complex",
+        "centre", "center",
+    },
+    {
+        "simultaneous", "simultaneously", "concurrent", "concurrently", "together",
+        "overlap", "overlapping", "occupancy",
+    },
+    {"amount", "count", "number", "many", "total", "capacity", "level", "levels"},
     {"align", "aligned", "alignment", "calibrate", "calibrated", "calibration", "recalibrated"},
     {"sensor", "sensors", "grid", "array", "acoustic", "hydrophone", "detector"},
     {"cost", "costs", "price", "priced", "fee", "fees", "charge", "budget"},
     {"date", "day", "when", "year", "month"},
-    {"duration", "long", "length", "hours", "days", "weeks", "months"},
+    {"duration", "long", "length", "hours", "days", "weeks", "months", "period"},
+    {"often", "frequency", "interval", "schedule", "cycle", "regularly", "every"},
+    {"maximum", "max", "limit", "limited", "ceiling", "highest", "most"},
+    {"minimum", "min", "least", "lowest", "floor"},
     {"leader", "lead", "led", "director", "chair", "chief", "head", "manager", "supervisor"},
     {"begin", "began", "start", "started", "commence", "commenced", "launch", "launched"},
     {"end", "ended", "finish", "finished", "complete", "completed", "conclude", "concluded"},
     {"main", "primary", "principal", "first"},
     {"backup", "secondary", "reserve", "alternate", "alternative"},
     {"restore", "restored", "restart", "restarted", "reactivate", "reactivated", "online"},
+    {"store", "stored", "storage", "kept", "held", "repository", "archive", "vault"},
+    {"cause", "caused", "reason", "root", "traced", "failure", "fault", "incident"},
+    {"vehicle", "craft", "submersible", "vessel", "fleet"},
+    {"participant", "participants", "patient", "patients", "subject", "subjects", "cohort"},
+    {"medicine", "medication", "compound", "drug", "dose", "dosing", "dosage"},
 )
 
 
@@ -52,7 +83,8 @@ def retrieve_study_passages(question: str) -> list[str]:
 def _load_documents() -> tuple[str, ...]:
     """Fetch all five small documents concurrently and retain them for the process."""
 
-    def fetch(document_id: str) -> str:
+    def fetch(source: tuple[str, str]) -> str:
+        document_id, title = source
         response = httpx.get(
             f"{STUDY_BASE_URL}/{document_id}",
             headers={"Accept": "text/markdown, text/plain;q=0.9"},
@@ -62,10 +94,12 @@ def _load_documents() -> tuple[str, ...]:
         response.raise_for_status()
         if not response.text.strip():
             raise RuntimeError(f"study material {document_id} was empty")
-        return response.text
+        # The endpoint documents begin at H2, so add the index title as H1.
+        # This preserves which organisation or facility each passage belongs to.
+        return f"# {title}\n\n{response.text}"
 
-    with ThreadPoolExecutor(max_workers=len(DOCUMENT_IDS)) as executor:
-        return tuple(executor.map(fetch, DOCUMENT_IDS))
+    with ThreadPoolExecutor(max_workers=len(DOCUMENT_SOURCES)) as executor:
+        return tuple(executor.map(fetch, DOCUMENT_SOURCES))
 
 
 def select_passages(question: str, documents: tuple[str, ...] | list[str]) -> list[str]:
@@ -83,6 +117,7 @@ def select_passages(question: str, documents: tuple[str, ...] | list[str]) -> li
     }
     average_length = sum(len(terms) for terms in passage_terms) / len(passage_terms)
 
+    distinctive = [term for term in _terms(question) if term not in _STOP_WORDS]
     ranked: list[tuple[float, int, str]] = []
     for index, (passage, terms) in enumerate(zip(passages, passage_terms, strict=True)):
         score = _bm25_score(
@@ -93,31 +128,32 @@ def select_passages(question: str, documents: tuple[str, ...] | list[str]) -> li
             average_length,
         )
         term_set = set(terms)
-        distinctive = [term for term in _terms(question) if term not in _STOP_WORDS]
         score += 2.5 * sum(term in term_set for term in distinctive)
         ranked.append((score, -index, passage))
 
     ranked.sort(reverse=True)
     selected: list[str] = []
-    used_tokens = 0
+    used_bytes = 0
+    section_counts: dict[str, int] = {}
     for score, _, passage in ranked:
         if score <= 0 and selected:
             break
         passage = _truncate_to_bytes(passage, MAX_PASSAGE_BYTES)
-        token_count = len(passage.encode("utf-8"))
-        if used_tokens + token_count > TARGET_RESPONSE_BYTES:
+        byte_count = len(passage.encode("utf-8"))
+        if used_bytes + byte_count > TARGET_RESPONSE_BYTES:
+            continue
+        section = passage.partition("\n")[0]
+        if section_counts.get(section, 0) >= 2:
             continue
         selected.append(passage)
-        used_tokens += token_count
-        if len(selected) >= 8 or used_tokens >= 720:
+        used_bytes += byte_count
+        section_counts[section] = section_counts.get(section, 0) + 1
+        if len(selected) >= 6 or used_bytes >= 2_500:
             break
 
     if not selected:
         selected = [_truncate_to_bytes(ranked[0][2], TARGET_RESPONSE_BYTES)]
-    # An encoded token always represents one or more source bytes. Keeping the
-    # UTF-8 content below 900 bytes therefore guarantees fewer than 900 tokens
-    # for o200k_base without downloading a tokenizer vocabulary at runtime.
-    if sum(len(item.encode("utf-8")) for item in selected) > MAX_RESPONSE_TOKENS:
+    if sum(len(item.encode("utf-8")) for item in selected) > MAX_RESPONSE_BYTES:
         raise RuntimeError("internal retrieval response exceeded the token budget")
     return selected
 

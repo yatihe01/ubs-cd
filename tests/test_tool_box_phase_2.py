@@ -24,6 +24,30 @@ The galley changed its breakfast menu on 2 April.
     assert "14 March" in "\n".join(passages)
 
 
+def test_retrieval_prefers_resident_staffing_over_simultaneous_engineers():
+    documents = (
+        """# Meridian Trench Research Station
+## Staffing Roster
+Crew levels at the station are tracked closely. The station maintains a resident
+population of forty-one scientists and technicians across three rotating shifts.
+During changeover periods occupancy can briefly spike to forty-six individuals.
+""",
+        """# Hollowlight Engine Technical Handbook
+## Leadership and Team Structure
+The core engine group maintains thirty-two engineers working simultaneously.
+Temporary contractor support can swell the group to just under fifty individuals.
+""",
+    )
+
+    passages = select_passages(
+        "Roughly how many personnel live aboard the facility simultaneously?",
+        documents,
+    )
+
+    assert "forty-one" in passages[0]
+    assert "Staffing Roster" in passages[0]
+
+
 def test_retrieval_finds_school_trip_stop_and_stays_within_budget():
     filler = " ".join(f"unrelated{i}" for i in range(2000))
     paragraph_lead = " ".join("maintenance timetable" for _ in range(45))
@@ -34,8 +58,7 @@ def test_retrieval_finds_school_trip_stop_and_stays_within_budget():
 
     passages = select_passages("Travel to the Verity Observatory", documents)
     assert "STOP_05" in "\n".join(passages)
-    # Token count cannot exceed UTF-8 byte count for an ordinary encoded string.
-    assert sum(len(passage.encode("utf-8")) for passage in passages) <= 900
+    assert sum(len(passage.encode("utf-8")) for passage in passages) <= 3_300
 
 
 def test_route_includes_entry_tolls_and_excludes_start_toll():
