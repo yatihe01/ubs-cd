@@ -1,7 +1,13 @@
+from contextlib import asynccontextmanager
+
+from a2wsgi import WSGIMiddleware
 from flask import Flask, jsonify
+from starlette.applications import Starlette
+from starlette.routing import Mount
 
 from challenges import BLUEPRINTS
 from challenges.adaptive_gateway.routes import handle_solve as active_challenge
+from challenges.tool_box import mcp_app as tool_box_mcp_app
 
 
 def create_app() -> Flask:
@@ -35,8 +41,29 @@ def create_app() -> Flask:
     return app
 
 
-app = create_app()
+flask_app = create_app()
+
+
+@asynccontextmanager
+async def lifespan(app: Starlette):
+    async with tool_box_mcp_app.lifespan(app):
+        yield
+
+
+# Tool Box has a permanent, challenge-specific base URL. Give the evaluator
+# https://<host>/tool-box so it discovers https://<host>/tool-box/mcp.
+app = Starlette(
+    lifespan=lifespan,
+    routes=[
+        Mount("/tool-box/mcp", app=tool_box_mcp_app),
+        Mount("/", app=WSGIMiddleware(flask_app)),
+    ],
+)
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    import os
+
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
