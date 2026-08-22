@@ -12,9 +12,7 @@ new edge, then every damped walk `v -> ... -> b`.  With a length damping factor
     delta = GAMMA * sum_a B[a] * sum_b F[b]
 
 where `B[a]` sums GAMMA**len over walks a -> u and `F[b]` over walks v -> b (both
-including the empty walk).  This single quantity already covers both halves of the
-principle: a brand new connection makes a term appear, and a shortcut makes an
-existing term grow because a shorter walk carries a larger GAMMA**len.
+including the empty walk).
 
 That raw weight is then split by the *pre-existing* relationship of the endpoints,
 which is what separates the brief's five examples:
@@ -22,6 +20,15 @@ which is what separates the brief's five examples:
   * `a` could not reach `v` before          -> a new path            (W_NEW)
   * `a` could already reach `v` before      -> a redundant route     (W_REDUNDANT)
   * the walk closes on itself (a == b)      -> recurring flow / loop (W_CYCLE)
+
+That split is binary, so on its own it misses the brief's *shortened* paths: it
+asks only whether `a` could reach `v`, never over how far.  A shortcut therefore
+collapsed to the same trivial (source, target) term the baseline removes, and an
+N-hop detour reduced to one hop scored exactly 0.0 for every N - indistinguishable
+from an unrelated new leaf.  `W_SHORTCUT` restores it by scoring the distance
+actually collapsed, `GAMMA - GAMMA**d` for the shortest existing distance `d`:
+zero when nothing reached `v` yet, zero when it already reached it in one hop
+(a plain repeat), positive and growing only for a genuine detour.
 
 The partition is by an intrinsic graph property rather than by pattern matching, so
 extension < convergence < return < multi-loop falls out of one formula instead of
@@ -55,6 +62,12 @@ MAX_DEPTH = 6
 W_NEW = 1.0
 W_REDUNDANT = 3.0
 W_CYCLE = 6.0
+
+# Weight of a *shortened* path, the signal the brief names alongside new paths.
+# It multiplies a per-node gain that is exactly zero for a first connection and
+# for a plain repeat, so W_SHORTCUT = 0.0 reproduces the measured 380 model
+# bit-for-bit (verified over 300 randomised streams) and is the rollback.
+W_SHORTCUT = 2.0
 
 # Repeated edges need no special constant any more.  Damping them by hand scored
 # 368 and forcing them to zero scored 344; the baseline subtraction in `_score`
@@ -159,7 +172,10 @@ class GhostChainsModel:
 
         # Nodes that could already reach `target`: for them the new edge adds a
         # redundant route rather than a first connection.
-        already_reaching = _reachers(self._radj, target)
+        # `depths[a]` is the shortest existing hop distance from `a` to `target`;
+        # membership alone is the old reachability test.
+        depths = _depths(self._radj, target)
+        already_reaching = depths
 
         new_weight = 0.0
         redundant_weight = 0.0
@@ -174,10 +190,25 @@ class GhostChainsModel:
             weight * forward[node] for node, weight in backward.items() if node in forward
         )
 
+        # Shortened paths - the half of the brief's principle the reachability
+        # split cannot see.  For a node `a` that could already reach `target` over
+        # `d` hops, the new edge replaces a walk of weight GAMMA**d with one of
+        # weight GAMMA, so the connectivity it gains is GAMMA - GAMMA**d.  The term
+        # is identically zero wherever the current model was measured good: nothing
+        # reaches `target` yet (a first connection, d undefined), or it reaches it
+        # in one hop already (a plain repeat, d == 1).  It turns positive only when
+        # a real detour is collapsed, and grows with the length collapsed.
+        shortcut_weight = sum(
+            weight * (GAMMA - GAMMA ** depths[node])
+            for node, weight in backward.items()
+            if node in depths
+        )
+
         raw = GAMMA * (
             W_NEW * new_weight * forward_total
             + W_REDUNDANT * redundant_weight * forward_total
             + W_CYCLE * cycle_weight
+            + W_SHORTCUT * shortcut_weight
         )
 
         # The (source, target) term built from two empty walks is the edge's own
@@ -230,22 +261,26 @@ def _damped_walks(index: dict[str, dict[str, None]], start: str) -> dict[str, fl
     return totals
 
 
-def _reachers(radj: dict[str, dict[str, None]], target: str) -> set[str]:
-    """Nodes with a path of length >= 1 to `target`, within MAX_DEPTH hops."""
-    seen: set[str] = set()
+def _depths(radj: dict[str, dict[str, None]], target: str) -> dict[str, int]:
+    """Shortest hop distance from each node to `target`, over paths of length >= 1
+    and at most MAX_DEPTH hops.  `target` itself appears only when it sits on a
+    cycle.  The key set is exactly what `_reachers` used to return; the values are
+    what makes shortening measurable."""
+    depths: dict[str, int] = {}
     frontier = [target]
-    for _ in range(MAX_DEPTH):
+    for depth in range(1, MAX_DEPTH + 1):
         nxt = [
             parent
             for node in frontier
             for parent in radj.get(node) or ()
-            if parent not in seen
+            if parent not in depths
         ]
         if not nxt:
             break
-        seen.update(nxt)
+        for parent in nxt:
+            depths.setdefault(parent, depth)
         frontier = nxt
-    return seen
+    return depths
 
 
 

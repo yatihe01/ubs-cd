@@ -92,21 +92,39 @@ def test_multi_loop_is_meaningfully_above_return(example_scores):
 
 # --- the signal the brief names but examples do not show --------------------------
 
-@pytest.mark.xfail(
-    reason="KNOWN GAP, deliberately left open.  The brief names 'shortened paths' "
-    "as a signal, but a shortcut whose endpoints are a source with no inbound and "
-    "a sink with no outbound contributes only the trivial (source, target) term - "
-    "exactly the term the baseline subtraction removes to keep ordinary flow on "
-    "the floor.  Separating the two needs a distance-aware redundancy weight "
-    "(gain = GAMMA**1 - GAMMA**d for the existing shortest distance d), which is a "
-    "later single-variable experiment.  The 372 baseline also scores this 0.0, so "
-    "no measurement yet says the evaluator rewards it.",
-    strict=True,
-)
 def test_shortcut_scores_above_unrelated_new_edge():
-    """`M -> S` collapses a four-hop route to one hop; `M -> N` adds a leaf."""
+    """`M -> S` collapses a four-hop route to one hop; `M -> N` adds a leaf.
+
+    The brief names 'shortened paths' alongside new ones, but the reachability
+    split alone cannot see them: it asks only *whether* an endpoint could already
+    reach the target, so a collapsed detour and a first connection both reduce to
+    the trivial (source, target) term the baseline removes.  `W_SHORTCUT` scores
+    the distance actually collapsed, `GAMMA - GAMMA**d`, which is zero for a first
+    connection and for a plain repeat and positive only for a real shortcut.
+    """
     chain = [(M, A), (A, C), (C, H), (H, S)]
     assert score_last(chain + [(M, S)]) > score_last(chain + [(M, N)])
+
+
+def test_shortcut_grows_with_the_distance_it_collapses():
+    """Collapsing a longer detour is a larger structural change than a shorter one."""
+    def collapse(hops):
+        chain = [(f"p{i}", f"p{i + 1}") for i in range(hops)]
+        return score_last(chain + [("p0", f"p{hops}")])
+
+    scores = [collapse(hops) for hops in range(2, 7)]
+    assert scores == sorted(scores)
+    assert scores[0] > 0.0
+
+
+def test_shortcut_term_is_silent_where_there_is_nothing_to_shorten():
+    """The term must not disturb the shapes the 380 model was measured on: a first
+    connection has no existing route, and a repeat already runs in one hop."""
+    assert score_last([(M, A)]) == 0.0
+    assert score_last([(M, A), (M, A)]) == 0.0
+    assert score_last([(A, A)]) == 0.0
+    chain = [(M, A), (A, C), (C, H), (H, S)]
+    assert score_last(chain + [(M, N)]) == 0.0
 
 
 # --- lookback window --------------------------------------------------------------
