@@ -11,17 +11,17 @@ package and is exposed through a Flask Blueprint.
 - `POST /adaptive-gateway/solve` - permanent Adaptive API Gateway endpoint
 - `POST /showdown/move` - SHOWDOWN bot, one move per call
 - `GET /showdown/health` - SHOWDOWN warm-up probe
+- `/mcp` - active Tool Box challenge MCP endpoint
+- `POST /kan-cheong-delivery-driver` - batch Kan Chiong Delivery Driver endpoint
+
+For Tool Box, select the registered `https://<host>` team URL. The evaluator
+appends `/mcp` when discovering the server.
 
 ## SHOWDOWN
 
 Register `https://<host>/showdown` as the bot URL: the coordinator appends
 `/move` and `/health` itself. `challenges/showdown/phase_1.py` holds the phase 1
 bot (heads-up, `table_rule` "standard", clears at a chip delta of +10).
-- `/tool-box/mcp` - Tool Box challenge MCP endpoint
-
-For Tool Box, submit `https://<host>/tool-box` as the team URL. The evaluator
-appends `/mcp` when discovering the server.
-- `POST /kan-cheong-delivery-driver` - batch Kan Chiong Delivery Driver endpoint
 
 ## Local setup
 
