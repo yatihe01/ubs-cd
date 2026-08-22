@@ -22,11 +22,142 @@ from typing import Any, Callable
 from challenges.showdown import phase_1, phase_2
 
 
-DECK = phase_2.DECK
-NUMBERS = phase_2.NUMBERS
+#: Identifies the deployed build. Bumped whenever behaviour changes, so that a
+#: disappointing replay can be attributed to a version rather than guessed at.
+BUILD = "p3-2026-08-22-explore-capped"
+
+DECK = 13
+NUMBERS = tuple(range(1, DECK + 1))
 TARGET_DELTA = 10
 
-POT_FRACTIONS = (0.40, 0.65, 0.90)
+# One size for every value bet. Sizing scaled to the edge, and sizing searched
+# for by an EV model, both measured worse than a flat fraction of the pot: five
+# opponents mean five guesses about how each of them responds, and those errors
+# compound into the chosen size faster than any real information does.
+BET_FRACTION = 0.60
+
+# Thresholds are per *opponent*: an equity of ``p ** live`` means we beat each
+# individual live range with probability p.  Expressed this way one constant
+# stays correct whether five seats are in the pot or one.
+VALUE_BET_P = 0.72
+VALUE_RAISE_P = 0.82
+STACK_OFF_P = 0.82
+
+# While the rule is still genuinely unknown every number has the same equity,
+# so there is nothing to bet.  Buy a few cheap showdowns instead of donating
+# the stack to a coin flip we cannot price.
+EXPLORE_MIN_CONFIDENCE = 0.45
+EXPLORE_CALL_CAP = 6
+EXPLORE_HANDS = 14
+EXPLORE_STACK_SHARE = 0.10
+# Where a read stops being provisional. Bet sizing rides this continuously, so
+# the first hand past the exploring threshold is not played at full size.
+CONFIDENT_AT = 0.85
+
+# Chasing the leader is a closing-stretch adjustment. Applied earlier it turns
+# every hand into a race that the leader is already winning.
+RACE_STARTS_AT = 0.70
+MAX_RACE_PRESSURE = 0.12
+
+# Surcharges on the pot odds a call has to beat: for the share of the stack it
+# risks, and for how much of the rule is still guesswork.  Both sit on the call
+# and only on the call.  That is where a marginal number quietly bleeds a leg
+# away; capping the *strong* hands instead measured far worse, because a hand
+# that cannot raise properly ends up calling off the same chips with worse odds.
+CALL_RISK_PREMIUM = 0.20
+CALL_DOUBT_PREMIUM = 0.30
+
+MAX_RULES = 64
+
+# How many surviving rule shapes are carried into an equity calculation. The
+# posterior collapses onto a handful within an orbit or two, and whatever mass
+# is left over is priced at the symmetric "we know nothing" share instead.
+POSTERIOR_LIMIT = 24
+
+# Per-observation likelihood that a hypothesis which mispredicts is still the
+# true rule.  Small enough to identify the rule fast, large enough that a
+# handful of side-pot artefacts cannot bury it.
+EPS_ERROR = 0.05
+_LOG_ODDS = math.log(EPS_ERROR / (1.0 - EPS_ERROR))
+
+_PRIMES = frozenset({2, 3, 5, 7, 11, 13})
+
+
+def _cmp(left: Any, right: Any) -> int:
+    return (left > right) - (left < right)
+
+
+# --------------------------------------------------------------------------
+# The hypothesis family
+# --------------------------------------------------------------------------
+#
+# Every rule the guide describes has the same shape: an ordering feature of
+# (number, community), optionally overridden by whether the number pairs the
+# community, and settled by high card, low card, or a split.  Rather than
+# hand-writing the combinations, generate them and drop the duplicates -
+# "highest wins" and "furthest below the community, high card" are different
+# sentences but the same relation.
+
+_FEATURES = {
+    "flat": lambda n, c: 0,
+    "near": lambda n, c: -abs(n - c),
+    "wrap_near": lambda n, c: -min(abs(n - c), DECK - abs(n - c)),
+    "even": lambda n, c: int(n % 2 == 0),
+    "parity_match": lambda n, c: int((n - c) % 2 == 0),
+    "above": lambda n, c: int(n > c),
+    "offset": lambda n, c: (n - c) % DECK,
+    "sum_mod": lambda n, c: (n + c) % DECK,
+    "prime": lambda n, c: int(n in _PRIMES),
+    "mod_three": lambda n, c: n % 3,
+    "high_half": lambda n, c: int(2 * n > DECK + 1),
+    "central": lambda n, c: -abs(2 * n - DECK - 1),
+}
+
+_TIEBREAKS = (("high", 1), ("low", -1), ("split", 0))
+
+
+def _build_hypotheses() -> "OrderedDict[str, list[list[int]]]":
+    """Score tables ``scores[community][number]``, one per distinct relation."""
+    built: "OrderedDict[str, list[list[int]]]" = OrderedDict()
+    seen: set[tuple] = set()
+    for feature_name, feature in _FEATURES.items():
+        for direction in (1, -1):
+            for pair_mod in (0, 1, -1):
+                for tie_name, tie in _TIEBREAKS:
+                    scores = [[0] * (DECK + 1) for _ in range(DECK + 1)]
+                    for community in NUMBERS:
+                        row = scores[community]
+                        for number in NUMBERS:
+                            row[number] = (
+                                pair_mod * 10_000 * int(number == community)
+                                + direction * feature(number, community) * 100
+                                + tie * number
+                            )
+                    # Two hypotheses are the same rule when they induce the
+                    # same ordering - ties included - for every community.
+                    signature = tuple(
+                        tuple(
+                            sum(
+                                1
+                                for other in NUMBERS
+                                if scores[community][other]
+                                < scores[community][number]
+                            )
+                            for number in NUMBERS
+                        )
+                        for community in NUMBERS
+                    )
+                    if signature in seen:
+                        continue
+                    seen.add(signature)
+                    sign = "+" if direction > 0 else "-"
+                    name = f"{feature_name}{sign}|pair{pair_mod:+d}|{tie_name}"
+                    built[name] = scores
+    return built
+
+
+HYPOTHESIS_SCORES = _build_hypotheses()
+HYPOTHESES = tuple(HYPOTHESIS_SCORES)
 
 # Thresholds are stated as a fraction of the way from an even split to
 # certainty, then converted by ``_relative_floor`` for the live table size.

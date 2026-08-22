@@ -684,3 +684,16 @@ def handle_rules():
 def handle_health():
     """Their warm-up probe, so a cold start does not eat our first move."""
     return jsonify(status="ok")
+
+
+@blueprint.get("/debug")
+def handle_debug():
+    """What this process actually is, and what it has learned so far.
+
+    A replay only shows the chips. This shows whether a bad leg was a rule we
+    never learned or a rule we learned and then misplayed - which have nothing
+    in common as bugs - and which build produced it.
+    """
+    from challenges.showdown import phase_3
+
+    return jsonify(build=phase_3.BUILD, rules=phase_3.rule_snapshot())
