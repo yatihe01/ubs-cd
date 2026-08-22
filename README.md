@@ -17,6 +17,7 @@ package and is exposed through a Flask Blueprint.
 Register `https://<host>/showdown` as the bot URL: the coordinator appends
 `/move` and `/health` itself. `challenges/showdown/phase_1.py` holds the phase 1
 bot (heads-up, `table_rule` "standard", clears at a chip delta of +10).
+- `POST /kan-cheong-delivery-driver` - batch Kan Chiong Delivery Driver endpoint
 
 ## Local setup
 

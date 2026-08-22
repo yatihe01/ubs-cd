@@ -4,7 +4,7 @@ from challenges.adaptive_gateway import blueprint
 from challenges.adaptive_gateway.solution import decode_payload, transform
 
 
-@blueprint.post("/solve")
+@blueprint.route("/solve", methods=["POST"])
 def handle_solve():
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
