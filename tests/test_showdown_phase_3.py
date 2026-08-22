@@ -155,11 +155,12 @@ def test_future_blinds_rotate_six_ways_and_skip_busted_seats():
 def test_lock_requires_plus_ten_and_strictly_beating_every_seat():
     players = build_body()["players"]
     players[0].update(chip_delta=15, stack=215)
-    players[3]["chip_delta"] = 15
+    players[3].update(chip_delta=15, stack=215)
     tied = phase_3.TurnState(
         build_body(
             players=players,
             your_stack=215,
+            pot=0,
             hand_number=60,
             total_hands=60,
         )
@@ -171,11 +172,56 @@ def test_lock_requires_plus_ten_and_strictly_beating_every_seat():
         build_body(
             players=players,
             your_stack=216,
+            pot=0,
             hand_number=60,
             total_hands=60,
         )
     )
     assert phase_3._endgame_locked(ahead)
+
+
+def test_a_majority_stack_is_banked_instead_of_value_bet_back():
+    players = build_body()["players"]
+    players[0].update(chip_delta=450, stack=650, bet_this_round=0)
+    players[1].update(busted=True, stack=0, chip_delta=-200)
+    players[2].update(busted=True, stack=0, chip_delta=-200)
+    players[5].update(busted=True, stack=0, chip_delta=-200)
+    players[3].update(stack=300, chip_delta=100)
+    players[4].update(stack=250, chip_delta=50)
+    state = phase_3.TurnState(
+        build_body(
+            players=players,
+            your_stack=650,
+            pot=0,
+            to_call=0,
+            legal_actions=["check", "bet"],
+            hand_number=20,
+            total_hands=60,
+        )
+    )
+
+    assert phase_3._endgame_locked(state)
+    assert phase_3.decide(state) == {"action": "check"}
+
+
+def test_a_protected_lead_folds_when_facing_a_bet():
+    players = build_body()["players"]
+    players[0].update(chip_delta=80, stack=275, bet_this_round=5)
+    players[3].update(stack=240, chip_delta=40, bet_this_round=20)
+    state = phase_3.TurnState(
+        build_body(
+            players=players,
+            your_stack=275,
+            pot=25,
+            to_call=15,
+            legal_actions=["fold", "call", "raise"],
+            hand_number=60,
+            total_hands=60,
+        )
+    )
+
+    assert phase_3._protect_late_lead(state)
+    assert phase_3.decide(state) == {"action": "fold"}
 
 
 def test_phase3_fuzz_always_returns_a_legal_move(client):

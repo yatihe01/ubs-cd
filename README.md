@@ -35,8 +35,12 @@ Register `https://<host>` with the coordinator; the evaluator appends
 `/ghost-chains/...` itself. Each phase is a separate module and the live model is
 whichever one `challenges/ghost_chains/routes.py` imports:
 
-- `solution.py` - Phase 1, structural signal only. Measured 380/400; kept frozen
-  as the fallback and as the parity reference for later phases.
+- `solution.py` - Phase 1, structural signal only. The measured 380/400 model
+  plus `W_SHORTCUT`, which scores the brief's *shortened* paths: before it, an
+  N-hop route collapsed to one hop scored exactly 0.0 for every N, the same as an
+  unrelated new leaf. `W_SHORTCUT = 0.0` reproduces the 380 model bit-for-bit
+  (verified over 300 randomised streams) and is the one-line rollback. Also the
+  parity reference for later phases.
 - `solution2.py` - Phase 2, the same structural core plus the `ipAddress` /
   `deviceId` identity layer. Currently live. With no identity fields anywhere in
   the stream it reproduces `solution.py` score for score, which is what keeps the
