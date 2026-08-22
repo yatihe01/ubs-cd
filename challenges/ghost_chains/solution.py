@@ -56,17 +56,11 @@ W_NEW = 1.0
 W_REDUNDANT = 3.0
 W_CYCLE = 6.0
 
-# A parallel edge leaves the simple-graph structure unchanged, so its delta is
-# damped: repeating an existing transfer is ordinary business, not new structure.
-#
-# NEXT EXPERIMENT (change this line and nothing else).  Evidence so far is a
-# gradient, and 0.35 is the untested middle of it:
-#   0.0  - forcing repeated edges to zero scored 344, the worst run of any version
-#   1.0  - what the 372 baseline effectively did (a repeat inside a cycle kept the
-#          full 0.54 context score), and 372 is the strongest baseline measured
-# So the gradient points at 1.0.  Try it only after the boundary fix has been
-# scored on its own, or the two effects cannot be told apart.
-REPEAT_DAMPING = 0.35
+# Repeated edges need no special constant any more.  Damping them by hand scored
+# 368 and forcing them to zero scored 344; the baseline subtraction in `_score`
+# now handles them from the principle instead - a repeat cancels its own trivial
+# term and keeps only whatever structure surrounds it, so a plain repeat lands on
+# 0.0 while a repeat inside a loop stays high.
 
 # Squash constant; larger spreads the low end, smaller spreads the high end.
 SQUASH = 2.0
@@ -185,8 +179,19 @@ class GhostChainsModel:
             + W_REDUNDANT * redundant_weight * forward_total
             + W_CYCLE * cycle_weight
         )
-        if (source, target) in self._edges:
-            raw *= REPEAT_DAMPING
+
+        # The (source, target) term built from two empty walks is the edge's own
+        # existence.  Every transaction carries it no matter what surrounds it, so
+        # it is not a structural *change* - subtract it and what remains is only
+        # the structure this edge actually joins.  This is what puts ordinary flow
+        # on the floor: an isolated edge, a leaf, a plain repeat and a fresh
+        # self-loop all cancel to exactly 0.0, while anything embedded in
+        # convergence or a loop keeps the surplus.
+        trivial = W_REDUNDANT if source in already_reaching else W_NEW
+        baseline = GAMMA * trivial
+        if source == target:
+            baseline += GAMMA * W_CYCLE
+        raw = max(raw - baseline, 0.0)
 
         return round(raw / (raw + SQUASH), 6)
 
