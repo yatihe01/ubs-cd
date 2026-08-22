@@ -638,6 +638,11 @@ def handle_move():
 
     # Keep the proven Phase 1 implementation intact while allowing the same
     # registered endpoint to serve the multi-leg, learnable-rule phase.
+    if body.get("phase") == 4:
+        from challenges.showdown.phase_4 import move_from_body
+
+        return jsonify(move_from_body(body))
+
     if body.get("phase") == 3:
         from challenges.showdown.phase_3 import move_from_body
 
@@ -659,6 +664,20 @@ def handle_move():
     except Exception:  # noqa: BLE001
         move = state.fallback()
     return jsonify(legalise(move, state))
+
+
+@blueprint.get("/rules")
+def handle_rules():
+    """What the bot has worked out about each codename, for offline review.
+
+    The codename to ruleset mapping is fixed for the whole event, so once a
+    codename resolves to a single hypothesis it can be pinned permanently in
+    ``phase_2.KNOWN_CODENAMES`` and every later attempt starts from certainty
+    instead of relearning under fire.
+    """
+    from challenges.showdown import phase_2
+
+    return jsonify(phase_2.rule_snapshot())
 
 
 @blueprint.get("/health")
