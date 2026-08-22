@@ -30,10 +30,6 @@ def transactions():
 
     try:
         parsed = [make_transaction(value) for value in values]
-        for transaction in parsed:
-            previous = model.scores.get(transaction.tx_id)
-            if previous is not None and previous[0] != transaction:
-                return jsonify(error=f"txId {transaction.tx_id!r} has a different payload"), 409
         results = [
             {"txId": transaction.tx_id, "riskScore": model.process(transaction)}
             for transaction in parsed
