@@ -249,11 +249,11 @@ def test_cross_component_reuse_grows_with_the_number_of_components():
     assert 0.0 < one < two
 
 
-def test_many_reuse_occurrences_outrank_one_stronger_structural_pattern():
-    """Occurrence count is now primary: seven weak, disconnected reuse
-    observations outrank the fewer but individually stronger return-path events."""
+def test_cross_component_reuse_stays_below_real_structural_signal():
+    """'Not automatic proof of risk on its own': a shared address across unrelated
+    pairs must not outrank an actual return path."""
     crowd = [(f"src{i}", f"dst{i}", ip(IP_A)) for i in range(8)]
-    assert last(crowd) > last(PHASE_ONE_EXAMPLES["return"])
+    assert last(crowd) < last(PHASE_ONE_EXAMPLES["return"])
 
 
 def test_identity_inside_one_component_is_not_counted_as_cross_component():

@@ -34,11 +34,8 @@ The partition is by an intrinsic graph property rather than by pattern matching,
 extension < convergence < return < multi-loop falls out of one formula instead of
 being hand-tuned per shape.
 
-Ranking is occurrence-first.  Independent convergence branches, pre-existing and
-newly closed cycles, shortcuts, and ordinary embedded extensions are counted as
-localized structural occurrences.  The weighted raw value above is compressed to
-a sub-tier tie-breaker, so every N+1 occurrence case outranks every N occurrence
-case regardless of weight; weights rank cases only inside one occurrence tier.
+Finally the raw weight is squashed by `raw / (raw + SQUASH)` into [0, 1): monotone,
+continuous, and without a hard cap, so ranking resolution survives at the top end.
 """
 
 from __future__ import annotations
@@ -48,11 +45,6 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
-
-from challenges.ghost_chains.ranking import (
-    directed_cycle_rank,
-    occurrence_rank_score,
-)
 
 
 # Active lookback window.  The boundary is EXCLUSIVE: a transaction is active only
@@ -73,8 +65,8 @@ W_CYCLE = 6.0
 
 # Weight of a *shortened* path, the signal the brief names alongside new paths.
 # It multiplies a per-node gain that is exactly zero for a first connection and
-# for a plain repeat.  W_SHORTCUT = 0.0 reproduces the measured 380 model's
-# weighted structural raw value; occurrence-first ranking is applied afterward.
+# for a plain repeat, so W_SHORTCUT = 0.0 reproduces the measured 380 model
+# bit-for-bit (verified over 300 randomised streams) and is the rollback.
 W_SHORTCUT = 2.0
 
 # Repeated edges need no special constant any more.  Damping them by hand scored
@@ -232,37 +224,7 @@ class GhostChainsModel:
             baseline += GAMMA * W_CYCLE
         raw = max(raw - baseline, 0.0)
 
-        # Count distinct localized structural events rather than every supporting
-        # damped path (many paths can describe the same convergence or loop).
-        convergence_occurrences = sum(
-            1
-            for predecessor in self._radj.get(target) or ()
-            if predecessor != source
-        )
-        relevant_nodes = set(backward) | set(forward)
-        existing_cycle_occurrences = directed_cycle_rank(
-            self._adj, self._radj, relevant_nodes
-        )
-        closes_cycle = any(
-            successor in backward and successor != target
-            for successor in self._adj.get(target) or ()
-        )
-        new_cycle_occurrences = int(
-            closes_cycle and not self._edges.get((source, target), 0)
-        )
-        shortcut_occurrences = int(depths.get(source, 0) > 1)
-        occurrence_count = (
-            convergence_occurrences
-            + existing_cycle_occurrences
-            + new_cycle_occurrences
-            + shortcut_occurrences
-        )
-        if raw > 0.0 and occurrence_count == 0:
-            occurrence_count = 1  # an ordinary embedded extension/new path
-
-        return occurrence_rank_score(
-            occurrence_count, raw, weighted_squash=SQUASH
-        )
+        return round(raw / (raw + SQUASH), 6)
 
 
 def _discard(index: defaultdict[str, dict[str, None]], key: str, value: str) -> None:

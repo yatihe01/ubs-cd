@@ -15,6 +15,7 @@ from challenges.ghost_chains.solution2 import make_transaction as phase_two_tran
 from challenges.ghost_chains.solution3 import (
     GhostChainsModel,
     LOOKBACK,
+    W_CORROBORATE,
     make_transaction,
 )
 
@@ -363,11 +364,12 @@ def test_contradicting_signals_compound_rather_than_merely_adding():
     identity_only = last(with_device + [(H, N, 9700.0, dev(DEV_A))])
     both = last(with_device + [(H, N, 9900.0, dev(DEV_A))])
 
-    # The combined case contains every identity occurrence plus the reversal, so
-    # its primary count tier is highest.  Identity-only contains several localized
-    # device observations and therefore outranks the single value occurrence even
-    # though reversal has the larger individual weight.
-    assert both > identity_only > value_only > neither
+    # Compare on the pre-squash weight, where the combination actually happens:
+    # the squash is monotone, so it cannot create or hide an interaction.
+    raw = lambda score: 2.0 * score / (1.0 - score)
+    additive_prediction = raw(value_only) + raw(identity_only) - raw(neither)
+    assert raw(both) > additive_prediction
+    assert both > value_only > identity_only > neither
 
 
 def test_corroboration_does_not_scale_identity_evidence_down():
@@ -378,11 +380,19 @@ def test_corroboration_does_not_scale_identity_evidence_down():
     flat = [(s, r, 100.0) for s, r, _ in decaying]
     add_device = lambda legs: [(s, r, a, dev(DEV_A)) for s, r, a in legs]
 
-    # Corroboration lowers weighted severity within each fixed occurrence tier; it
-    # does not erase any of the device observations from the primary count.
+    # Measured on the pre-squash weight, where the combination happens.
+    raw = lambda score: 2.0 * score / (1.0 - score)
+    uplift_when_corroborated = raw(last(add_device(decaying))) - raw(last(decaying))
+    uplift_when_neutral = raw(last(add_device(flat))) - raw(last(flat))
+
+    # Corroboration lowers the score, but the shared device is worth the same in
+    # absolute terms either way - it is offset, never scaled down.  Tolerance is
+    # loose because scores are rounded to six decimals before the squash is
+    # inverted here; had corroboration *scaled* identity the uplift would have
+    # shrunk to (1 - W_CORROBORATE) of its value, which is far outside it.
     assert last(add_device(decaying)) < last(add_device(flat))
-    assert last(add_device(decaying)) > last(decaying)
-    assert last(add_device(flat)) > last(flat)
+    assert uplift_when_corroborated == pytest.approx(uplift_when_neutral, rel=1e-4)
+    assert uplift_when_corroborated > 2 * (1.0 - W_CORROBORATE) * uplift_when_neutral
 
 
 def test_identity_vanishing_mid_flow_still_signals_under_phase_three():

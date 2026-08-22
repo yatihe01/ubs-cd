@@ -35,11 +35,12 @@ Register `https://<host>` with the coordinator; the evaluator appends
 `/ghost-chains/...` itself. Each phase is a separate module and the live model is
 whichever one `challenges/ghost_chains/routes.py` imports:
 
-- `solution.py` - Phase 1, structural signal only. Its weighted core is the
-  measured 380/400 model plus `W_SHORTCUT`, which scores the brief's *shortened*
-  paths: before it, an
+- `solution.py` - Phase 1, structural signal only. The measured 380/400 model
+  plus `W_SHORTCUT`, which scores the brief's *shortened* paths: before it, an
   N-hop route collapsed to one hop scored exactly 0.0 for every N, the same as an
-  unrelated new leaf. It is also the parity reference for later phases.
+  unrelated new leaf. `W_SHORTCUT = 0.0` reproduces the 380 model bit-for-bit
+  (verified over 300 randomised streams) and is the one-line rollback. Also the
+  parity reference for later phases.
 - `solution2.py` - Phase 2, the same structural core plus the `ipAddress` /
   `deviceId` identity layer. With no identity fields anywhere in the stream it
   reproduces `solution.py` score for score, which is what keeps the Phase 1 half
@@ -52,12 +53,6 @@ whichever one `challenges/ghost_chains/routes.py` imports:
 The structural core is duplicated verbatim across the three modules and the parity
 tests pin them together, so a change to it - `W_SHORTCUT`, `GAMMA`, `SQUASH`, any
 `W_*` - has to be made in all three or the parity tests fail.
-
-All phases now use occurrence-first ranking from `ranking.py`. The primary key is
-the total number of localized risky observations, including repeated observations
-inside one signal dimension. The existing weighted formulas are compressed into a
-strictly sub-tier tie-breaker, so an additional occurrence always outranks any
-lower-count case regardless of its weight.
 
 ## Local setup
 
