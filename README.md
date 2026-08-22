@@ -20,8 +20,10 @@ appends `/mcp` when discovering the server.
 ## SHOWDOWN
 
 Register `https://<host>/showdown` as the bot URL: the coordinator appends
-`/move` and `/health` itself. `challenges/showdown/phase_1.py` holds the phase 1
-bot (heads-up, `table_rule` "standard", clears at a chip delta of +10).
+`/move` and `/health` itself. Phase 1 requests use
+`challenges/showdown/phase_1.py`; Phase 2 requests are dispatched to
+`challenges/showdown/phase_2.py`, which learns opaque table rules by codename
+across the four 40-hand legs and retries.
 
 ## Local setup
 
