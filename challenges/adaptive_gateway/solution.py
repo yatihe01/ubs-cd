@@ -22,8 +22,13 @@ def decode_payload(encoded_payload: str) -> dict:
     except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("payload must contain base64-encoded JSON") from exc
 
-    if not isinstance(decoded, dict) or not isinstance(decoded.get("adaptInput"), dict):
-        raise ValueError("payload must contain an adaptInput object")
+    if not isinstance(decoded, dict):
+        raise ValueError("payload must contain an object")
+
+    has_adapt_input = isinstance(decoded.get("adaptInput"), dict)
+    has_slo_data = "heartbeats" in decoded or "sloQuery" in decoded
+    if not has_adapt_input and not has_slo_data:
+        raise ValueError("payload must contain adaptInput or SLO data")
 
     return decoded
 

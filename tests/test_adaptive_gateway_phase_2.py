@@ -79,3 +79,23 @@ def test_adaptive_gateway_slo_is_empty_without_matching_heartbeats(client):
         "availability": 0.0,
         "p95LatencyMs": 0,
     }
+
+
+def test_adaptive_gateway_returns_only_slo_output_for_slo_only_payload(client):
+    payload = encode_payload(
+        {
+            "heartbeats": [
+                {"service": "auth", "timestamp": 10, "latencyMs": 100, "status": "OK"},
+            ],
+            "sloQuery": {"service": "auth", "since": 10},
+        }
+    )
+
+    response = client.post("/solve", json={"payload": payload})
+
+    assert response.get_json() == {
+        "sloOutput": {
+            "availability": 1.0,
+            "p95LatencyMs": 100,
+        }
+    }
