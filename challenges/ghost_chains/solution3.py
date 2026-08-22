@@ -109,6 +109,13 @@ W_CYCLE = 6.0
 # bit-for-bit (verified over 300 randomised streams) and is the rollback.
 # Kept in step with `solution.py` and `solution2.py`: the structural core is
 # shared verbatim across the three phases and the parity tests enforce it.
+#
+# PHASE 3 CONSTRAINT, which the other two files do not have: raising this also
+# raises convergence, and convergence is what Example 3 has to outrank.  Measured
+# margin of Example 3 over Example 4 by W_SHORTCUT: 0.046 at 0.0, 0.011 at 2.0,
+# 0.003 at 2.5, and NEGATIVE from ~2.7 up, which violates the brief's required
+# ordering.  `test_value_reversal_is_the_highest_of_the_four` fails if it is
+# crossed - if that test breaks after a structural retune, this is why.
 W_SHORTCUT = 2.0
 
 # Squash constant; larger spreads the low end, smaller spreads the high end.
