@@ -37,6 +37,8 @@ import heapq
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import json
+from math import exp
 from typing import Any
 
 
@@ -74,29 +76,17 @@ class Transaction:
     to_user: str
     amount: float
     created_at: datetime
-    # Phase 2 carries identity signals.  They are stored but unused in Phase 1 so
-    # that "present" and "absent" are both observable states once that phase opens.
-    ip_address: str | None = None
-    device_id: str | None = None
+    ip_address: Any
+    device_id: Any
+    payload_signature: str
 
 
 class GhostChainsModel:
     def __init__(self) -> None:
-        # Min-heap by (created_at, seq) so expiry stays correct even if arrival
-        # order and timestamp order disagree.
-        self._active: list[tuple[datetime, int, Transaction]] = []
-        self._seq = 0
-        self._edges: defaultdict[tuple[str, str], int] = defaultdict(int)
-        # Adjacency is kept as insertion-ordered dicts used as sets: iteration order
-        # is then a function of the input stream alone, so float accumulation - and
-        # therefore every score - is reproducible across processes, which a plain
-        # set (hash-randomised) would not be.
-        self._adj: defaultdict[str, dict[str, None]] = defaultdict(dict)
-        self._radj: defaultdict[str, dict[str, None]] = defaultdict(dict)
-        # txId -> score, for idempotent replays.  Kept for every txId ever seen:
-        # a replay must return the original score even after the transaction
-        # itself has aged out of the window.
-        self._memo: dict[str, float] = {}
+        self.transactions: list[Transaction] = []
+        self.graph: defaultdict[str, set[str]] = defaultdict(set)
+        self.edge_counts: defaultdict[tuple[str, str], int] = defaultdict(int)
+        self.scores: dict[str, tuple[Transaction, float]] = {}
         self.latest_time: datetime | None = None
 
     def reset(self) -> None:
@@ -113,127 +103,51 @@ class GhostChainsModel:
 
         current_time = max(self.latest_time or transaction.created_at, transaction.created_at)
         cutoff = current_time - LOOKBACK
-        self._expire(cutoff)
-
+        active_transactions = [
+            item for item in self.transactions if item.created_at > cutoff
+        ]
+        expired = len(active_transactions) != len(self.transactions)
+        active_ids = {item.tx_id for item in active_transactions}
+        self.scores = {
+            tx_id: value for tx_id, value in self.scores.items() if tx_id in active_ids
+        }
+        self.transactions = active_transactions
+        if expired:
+            self._rebuild_graph()
         score = self._score(transaction.from_user, transaction.to_user)
 
-        if transaction.created_at >= cutoff:
-            self._admit(transaction)
-        self._memo[transaction.tx_id] = score
+        if transaction.created_at > cutoff:
+            self.transactions.append(transaction)
+            edge = (transaction.from_user, transaction.to_user)
+            self.edge_counts[edge] += 1
+            self.graph[transaction.from_user].add(transaction.to_user)
+        if transaction.created_at > cutoff:
+            self.scores[transaction.tx_id] = (transaction, score)
         self.latest_time = current_time
         return score
 
-    # ----- streaming graph state -------------------------------------------------
-
-    def _admit(self, transaction: Transaction) -> None:
-        heapq.heappush(self._active, (transaction.created_at, self._seq, transaction))
-        self._seq += 1
-        edge = (transaction.from_user, transaction.to_user)
-        self._edges[edge] += 1
-        self._adj[edge[0]][edge[1]] = None
-        self._radj[edge[1]][edge[0]] = None
-
-    def _expire(self, cutoff: datetime) -> None:
-        while self._active and self._active[0][0] < cutoff:
-            _, _, transaction = heapq.heappop(self._active)
+    def _rebuild_graph(self) -> None:
+        self.graph = defaultdict(set)
+        self.edge_counts = defaultdict(int)
+        for transaction in self.transactions:
             edge = (transaction.from_user, transaction.to_user)
-            self._edges[edge] -= 1
-            if self._edges[edge] > 0:
-                continue
-            del self._edges[edge]
-            _discard(self._adj, edge[0], edge[1])
-            _discard(self._radj, edge[1], edge[0])
-
-    # ----- scoring ---------------------------------------------------------------
+            self.edge_counts[edge] += 1
+            self.graph[transaction.from_user].add(transaction.to_user)
 
     def _score(self, source: str, target: str) -> float:
-        # Damped walk weights in the graph as it stands *before* this edge exists.
-        backward = _damped_walks(self._radj, source)   # a -> ... -> source
-        forward = _damped_walks(self._adj, target)     # target -> ... -> b
-        forward_total = sum(forward.values())
-
-        # Nodes that could already reach `target`: for them the new edge adds a
-        # redundant route rather than a first connection.
-        already_reaching = _reachers(self._radj, target)
-
-        new_weight = 0.0
-        redundant_weight = 0.0
-        for node, weight in backward.items():
-            if node in already_reaching:
-                redundant_weight += weight
-            else:
-                new_weight += weight
-
-        # Walks that close on themselves: the graph's capacity for recurring flow.
-        cycle_weight = sum(
-            weight * forward[node] for node, weight in backward.items() if node in forward
+        new_pairs = _new_reachable_pairs(self.graph, source, target)
+        convergence = len(_predecessors(self.graph, target)) + len(
+            _ancestors(self.graph, source) & _ancestors(self.graph, target)
         )
-
-        raw = GAMMA * (
-            W_NEW * new_weight * forward_total
-            + W_REDUNDANT * redundant_weight * forward_total
-            + W_CYCLE * cycle_weight
+        circulation_capacity = _scc_capacity(self.graph, source, target)
+        repeated_edge = self.edge_counts[(source, target)]
+        raw_signal = (
+            0.2 * new_pairs
+            + 0.2 * convergence
+            + circulation_capacity
+            + 0.05 * repeated_edge
         )
-        if (source, target) in self._edges:
-            raw *= REPEAT_DAMPING
-
-        return round(raw / (raw + SQUASH), 6)
-
-
-def _discard(index: defaultdict[str, dict[str, None]], key: str, value: str) -> None:
-    neighbours = index.get(key)
-    if neighbours is None:
-        return
-    neighbours.pop(value, None)
-    if not neighbours:
-        del index[key]
-
-
-def _damped_walks(index: dict[str, dict[str, None]], start: str) -> dict[str, float]:
-    """Sum of GAMMA**length over walks between `start` and each node, following
-    `index`.  The empty walk is included, so `start` itself starts at 1.0."""
-    totals: dict[str, float] = {start: 1.0}
-    frontier: dict[str, float] = {start: 1.0}
-    for _ in range(MAX_DEPTH):
-        nxt: dict[str, float] = {}
-        for node, weight in frontier.items():
-            carried = weight * GAMMA
-            if carried < MIN_WEIGHT:
-                continue
-            for neighbour in index.get(node) or ():
-                nxt[neighbour] = nxt.get(neighbour, 0.0) + carried
-        if not nxt:
-            break
-        if len(nxt) > MAX_FRONTIER:
-            nxt = dict(
-                heapq.nlargest(MAX_FRONTIER, nxt.items(), key=lambda item: item[1])
-            )
-        for node, weight in nxt.items():
-            totals[node] = totals.get(node, 0.0) + weight
-        frontier = nxt
-    return totals
-
-
-def _reachers(radj: dict[str, dict[str, None]], target: str) -> set[str]:
-    """Nodes with a path of length >= 1 to `target`, within MAX_DEPTH hops."""
-    seen: set[str] = set()
-    frontier = [target]
-    for _ in range(MAX_DEPTH):
-        nxt = [
-            parent
-            for node in frontier
-            for parent in radj.get(node) or ()
-            if parent not in seen
-        ]
-        if not nxt:
-            break
-        seen.update(nxt)
-        frontier = nxt
-    return seen
-
-
-
-# ----- request parsing -----------------------------------------------------------
+        return round(1.0 - exp(-raw_signal / 8.0), 6)
 
 
 def parse_created_at(value: Any) -> datetime:
@@ -270,6 +184,95 @@ def make_transaction(value: Any) -> Transaction:
         to_user=value["toUserId"],
         amount=amount,
         created_at=parse_created_at(value.get("createdAt")),
-        ip_address=_optional_str(value.get("ipAddress")),
-        device_id=_optional_str(value.get("deviceId")),
+        ip_address=value.get("ipAddress"),
+        device_id=value.get("deviceId"),
+        payload_signature=json.dumps(value, sort_keys=True, separators=(",", ":")),
     )
+
+
+def _reachable(graph: dict[str, set[str]], start: str) -> set[str]:
+    found: set[str] = set()
+    pending = list(graph.get(start, ()))
+    while pending:
+        node = pending.pop()
+        if node not in found:
+            found.add(node)
+            pending.extend(graph.get(node, ()))
+    return found
+
+
+def _new_reachable_pairs(graph: dict[str, set[str]], source: str, target: str) -> int:
+    ancestors = _predecessors(graph, source) | {source}
+    descendants = _reachable(graph, target) | {target}
+    return sum(
+        1
+        for ancestor in ancestors
+        for descendant in descendants
+        if descendant != ancestor and descendant not in _reachable(graph, ancestor)
+    )
+
+
+def _ancestors(graph: dict[str, set[str]], node: str) -> set[str]:
+    reverse: defaultdict[str, set[str]] = defaultdict(set)
+    for source, targets in graph.items():
+        for target in targets:
+            reverse[target].add(source)
+    found: set[str] = set()
+    pending = list(reverse.get(node, ()))
+    while pending:
+        ancestor = pending.pop()
+        if ancestor not in found:
+            found.add(ancestor)
+            pending.extend(reverse.get(ancestor, ()))
+    return found
+
+
+def _predecessors(graph: dict[str, set[str]], node: str) -> set[str]:
+    return {
+        source
+        for source, targets in graph.items()
+        if node in targets
+    }
+
+
+def _scc_capacity(graph: dict[str, set[str]], source: str, target: str) -> int:
+    augmented = {node: set(targets) for node, targets in graph.items()}
+    augmented.setdefault(source, set()).add(target)
+    nodes = set(augmented)
+    for neighbours in augmented.values():
+        nodes.update(neighbours)
+    index = 0
+    indices: dict[str, int] = {}
+    lowlinks: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    capacities: list[int] = []
+
+    def visit(node: str) -> None:
+        nonlocal index
+        indices[node] = index
+        lowlinks[node] = index
+        index += 1
+        stack.append(node)
+        on_stack.add(node)
+        for neighbour in augmented.get(node, ()):
+            if neighbour not in indices:
+                visit(neighbour)
+                lowlinks[node] = min(lowlinks[node], lowlinks[neighbour])
+            elif neighbour in on_stack:
+                lowlinks[node] = min(lowlinks[node], indices[neighbour])
+        if lowlinks[node] == indices[node]:
+            component_size = 0
+            while True:
+                member = stack.pop()
+                on_stack.remove(member)
+                component_size += 1
+                if member == node:
+                    break
+            if component_size > 1:
+                capacities.append(component_size * (component_size - 1))
+
+    for node in nodes:
+        if node not in indices:
+            visit(node)
+    return sum(capacities)
