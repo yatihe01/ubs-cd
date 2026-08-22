@@ -40,25 +40,23 @@ mcp.tool(
 )
 mcp.tool(recognize_shape)
 mcp.tool(
-    retrieve_study_passages,
+    choose_next_node,
     description=(
-        "Use for School Days factual-recall questions and for finding the STOP_XX "
-        "node associated with a named school-trip place. Pass the complete question. "
-        "Before calling, use your semantic understanding to rewrite the intended "
-        "concept as concise likely corpus terminology in semantic_context, including "
-        "synonyms absent from the question (for example, air-scrubbing equipment "
-        "breaking down means oxygen scrubber failure, ventilation fault, malfunction). "
-        "Passages include source title and section and are ranked most relevant first; "
-        "answer from their evidence."
+        "MANDATORY for every question containing map_id or asking how to travel from "
+        "one node to another. Call immediately; never answer a map route without this "
+        "tool. On the first call, copy map_id exactly, use the stated start as "
+        "current_node, the requested endpoint as destination, and null for "
+        "hops_remaining unless the question supplies a remaining-hop value. The result "
+        "is one adjacent node: call again from that node and repeat until destination."
     ),
 )
 mcp.tool(
-    choose_next_node,
+    retrieve_study_passages,
     description=(
-        "Use at every step of a School Days journey. Pass the exact map_id, current "
-        "node, destination node, and the question's current hops_remaining value (or "
-        "null when none is specified). Returns one adjacent next node on the cheapest "
-        "directed route, counting edge weights plus the toll of every entered node."
+        "Use for factual recall and for finding the STOP_XX of a named school-trip "
+        "place. Pass the complete question and a concise semantic_context rewrite with "
+        "likely corpus terms and absent synonyms. Passages are ranked most relevant "
+        "first; answer from their evidence."
     ),
 )
 
