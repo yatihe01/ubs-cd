@@ -65,14 +65,24 @@ def calculate_slo(heartbeats: object, slo_query: object) -> dict:
     if not isinstance(service, str) or not isinstance(since, (int, float)):
         return {"availability": 0.0, "p95LatencyMs": 0}
 
-    in_window = [
-        heartbeat
-        for heartbeat in heartbeats
-        if isinstance(heartbeat, dict)
-        and heartbeat.get("service") == service
-        and isinstance(heartbeat.get("timestamp"), (int, float))
-        and heartbeat["timestamp"] >= since
-    ]
+    in_window = []
+    seen_keys = set()
+    for heartbeat in heartbeats:
+        if not isinstance(heartbeat, dict):
+            continue
+        timestamp = heartbeat.get("timestamp")
+        if (
+            heartbeat.get("service") != service
+            or not isinstance(timestamp, (int, float))
+            or timestamp < since
+        ):
+            continue
+        key = (heartbeat.get("service"), timestamp)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        in_window.append(heartbeat)
+
     if not in_window:
         return {"availability": 0.0, "p95LatencyMs": 0}
 

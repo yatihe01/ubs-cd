@@ -99,3 +99,90 @@ def test_adaptive_gateway_returns_only_slo_output_for_slo_only_payload(client):
             "p95LatencyMs": 100,
         }
     }
+
+
+def test_adaptive_gateway_slo_deduplicates_repeated_heartbeats(client):
+    payload = encode_payload(
+        {
+            "heartbeats": [
+                {"service": "auth", "timestamp": 100, "latencyMs": 50, "status": "OK"},
+                {"service": "auth", "timestamp": 100, "latencyMs": 50, "status": "OK"},
+                {"service": "auth", "timestamp": 200, "latencyMs": 150, "status": "FAIL"},
+            ],
+            "sloQuery": {"service": "auth", "since": 100},
+        }
+    )
+
+    response = client.post("/solve", json={"payload": payload})
+
+    assert response.get_json() == {
+        "sloOutput": {
+            "availability": 0.5,
+            "p95LatencyMs": 150,
+        }
+    }
+
+
+def test_adaptive_gateway_slo_status_matching_is_case_insensitive(client):
+    payload = encode_payload(
+        {
+            "heartbeats": [
+                {"service": "auth", "timestamp": 100, "latencyMs": 50, "status": "ok"},
+                {"service": "auth", "timestamp": 101, "latencyMs": 60, "status": "Fail"},
+                {"service": "auth", "timestamp": 102, "latencyMs": 70, "status": "OK"},
+            ],
+            "sloQuery": {"service": "auth", "since": 100},
+        }
+    )
+
+    response = client.post("/solve", json={"payload": payload})
+
+    assert response.get_json() == {
+        "sloOutput": {
+            "availability": 2 / 3,
+            "p95LatencyMs": 70,
+        }
+    }
+
+
+def test_adaptive_gateway_slo_counts_failures_missing_latency(client):
+    payload = encode_payload(
+        {
+            "heartbeats": [
+                {"service": "auth", "timestamp": 100, "latencyMs": 50, "status": "OK"},
+                {"service": "auth", "timestamp": 101, "status": "FAIL"},
+            ],
+            "sloQuery": {"service": "auth", "since": 100},
+        }
+    )
+
+    response = client.post("/solve", json={"payload": payload})
+
+    assert response.get_json() == {
+        "sloOutput": {
+            "availability": 0.5,
+            "p95LatencyMs": 50,
+        }
+    }
+
+
+def test_adaptive_gateway_slo_p95_on_larger_sample(client):
+    heartbeats = [
+        {"service": "orders", "timestamp": i, "latencyMs": i * 10, "status": "OK"}
+        for i in range(1, 21)
+    ]
+    payload = encode_payload(
+        {
+            "heartbeats": heartbeats,
+            "sloQuery": {"service": "orders", "since": 1},
+        }
+    )
+
+    response = client.post("/solve", json={"payload": payload})
+
+    assert response.get_json() == {
+        "sloOutput": {
+            "availability": 1.0,
+            "p95LatencyMs": 190,
+        }
+    }
