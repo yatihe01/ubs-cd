@@ -50,13 +50,12 @@ class GhostChainsModel:
         cutoff = current_time - LOOKBACK
         self._expire(cutoff)
 
-        # The active window is strict: an event exactly 24 hours old, or a
-        # still older late arrival, cannot change the graph's structural signal.
+        # Every arriving transaction is scored against the active history. A
+        # late transaction outside the strict window is simply not admitted to
+        # future state.
+        score = self._score(transaction.from_user, transaction.to_user)
         if transaction.created_at > cutoff:
-            score = self._score(transaction.from_user, transaction.to_user)
             self._admit(transaction)
-        else:
-            score = 0.0
         self.scores[transaction.tx_id] = (transaction, score)
         self.latest_time = current_time
         return score
@@ -87,6 +86,16 @@ class GhostChainsModel:
                 del self.graph[edge[0]]
 
     def _score(self, source: str, target: str) -> float:
+        # A parallel transaction leaves the Phase 1 simple-graph structure
+        # unchanged, so its structural delta is zero.
+        if target in self.graph.get(source, ()):
+            return 0.0
+
+        # A new self-loop creates recurring flow immediately.  Keep it at the
+        # same base strength as one pre-existing return path.
+        if source == target:
+            return 0.38
+
         return_paths = _path_count(self.graph, target, source)
         convergence_paths = sum(
             _path_count(self.graph, ancestor, target)
@@ -94,6 +103,14 @@ class GhostChainsModel:
             if ancestor != source
         )
         score = 0.38 * min(return_paths, 2) + 0.16 * min(convergence_paths, 4)
+
+        # Reward a genuine shortcut without lifting ordinary isolated or
+        # extension edges away from the low-risk baseline.  This is deliberately
+        # a small tie-breaker so the proven 372 return/convergence ordering stays
+        # dominant.
+        existing_distance = _shortest_distance(self.graph, source, target)
+        if existing_distance is not None:
+            score += 0.04 * min(existing_distance - 1, 4)
         return round(min(score, 1.0), 6)
 
 
@@ -138,6 +155,22 @@ def _path_count(graph: dict[str, set[str]], start: str, end: str) -> int:
             elif neighbour not in visited:
                 pending.append((neighbour, visited | {neighbour}))
     return count
+
+
+def _shortest_distance(
+    graph: dict[str, set[str]], start: str, end: str
+) -> int | None:
+    distances = {start: 0}
+    pending = [start]
+    for node in pending:
+        next_distance = distances[node] + 1
+        for neighbour in graph.get(node, ()):
+            if neighbour == end:
+                return next_distance
+            if neighbour not in distances:
+                distances[neighbour] = next_distance
+                pending.append(neighbour)
+    return None
 
 
 def _ancestors(graph: dict[str, set[str]], node: str) -> set[str]:

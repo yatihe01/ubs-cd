@@ -68,7 +68,7 @@ def test_restored_372_window_excludes_exact_boundary():
     assert [item.tx_id for item in model.transactions] == ["ba"]
 
 
-def test_stale_late_arrival_has_zero_score_and_does_not_enter_state():
+def test_stale_late_arrival_is_scored_but_does_not_enter_state():
     model = GhostChainsModel()
     model.process(
         transaction(
@@ -83,7 +83,7 @@ def test_stale_late_arrival_has_zero_score_and_does_not_enter_state():
         transaction("stale", "B", "A", created_at=BASE_TIME)
     )
 
-    assert score == 0.0
+    assert score == 0.38
     assert [item.tx_id for item in model.transactions] == ["future"]
 
 
@@ -110,6 +110,21 @@ def test_expiring_one_parallel_transaction_keeps_edge_active():
 
     assert score == 0.38
     assert [item.tx_id for item in model.transactions] == ["ab-fresh", "ba"]
+
+
+def test_shortcut_scores_above_an_unrelated_leaf_edge():
+    chain = [("M", "A"), ("A", "C"), ("C", "H"), ("H", "S")]
+
+    assert scores(chain + [("M", "S")])[-1] == 0.12
+    assert scores(chain + [("M", "N")])[-1] == 0.0
+
+
+def test_repeated_active_edge_has_no_structural_delta():
+    assert scores([("A", "B"), ("B", "A"), ("A", "B")])[-1] == 0.0
+
+
+def test_new_self_loop_registers_recurring_flow():
+    assert scores([("A", "A")])[-1] == 0.38
 
 
 def test_duplicate_transaction_is_idempotent():
