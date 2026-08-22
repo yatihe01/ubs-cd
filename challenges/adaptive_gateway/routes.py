@@ -1,7 +1,7 @@
 from flask import jsonify, request
 
 from challenges.adaptive_gateway import blueprint
-from challenges.adaptive_gateway.solution import decode_payload, transform
+from challenges.adaptive_gateway.solution import calculate_slo, decode_payload, transform
 
 
 @blueprint.route("/solve", methods=["POST"])
@@ -15,4 +15,9 @@ def handle_solve():
     except ValueError as exc:
         return jsonify(error=str(exc)), 400
 
-    return jsonify(adaptOutput=transform(decoded["adaptInput"]))
+    response = {"adaptOutput": transform(decoded["adaptInput"])}
+    if "heartbeats" in decoded or "sloQuery" in decoded:
+        response["sloOutput"] = calculate_slo(
+            decoded.get("heartbeats"), decoded.get("sloQuery")
+        )
+    return jsonify(response)
