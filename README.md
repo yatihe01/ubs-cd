@@ -9,9 +9,9 @@ package and is exposed through a Flask Blueprint.
 - `GET /health` - Render health check
 - `POST /solve` - alias for the currently active challenge
 - `POST /adaptive-gateway/solve` - permanent Adaptive API Gateway endpoint
-- `/tool-box/mcp` - Tool Box challenge MCP endpoint
+- `/mcp` - active Tool Box challenge MCP endpoint
 
-For Tool Box, submit `https://<host>/tool-box` as the team URL. The evaluator
+For Tool Box, select the registered `https://<host>` team URL. The evaluator
 appends `/mcp` when discovering the server.
 - `POST /kan-cheong-delivery-driver` - batch Kan Chiong Delivery Driver endpoint
 

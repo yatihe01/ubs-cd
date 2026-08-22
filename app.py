@@ -50,12 +50,12 @@ async def lifespan(app: Starlette):
         yield
 
 
-# Tool Box has a permanent, challenge-specific base URL. Give the evaluator
-# https://<host>/tool-box so it discovers https://<host>/tool-box/mcp.
+# The evaluation portal stores only the team's root URL and always appends
+# /mcp, so the currently active MCP challenge must be mounted at root /mcp.
 app = Starlette(
     lifespan=lifespan,
     routes=[
-        Mount("/tool-box/mcp", app=tool_box_mcp_app),
+        Mount("/mcp", app=tool_box_mcp_app),
         Mount("/", app=WSGIMiddleware(flask_app)),
     ],
 )

@@ -11,5 +11,5 @@ mcp.tool(calculate)
 mcp.tool(recognize_shape)
 
 
-# Mounting this ASGI app at /tool-box/mcp exposes the MCP endpoint there.
+# The parent application mounts this ASGI app at the evaluator's root /mcp.
 mcp_app = mcp.http_app(path="/")
