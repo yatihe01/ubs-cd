@@ -68,7 +68,9 @@ from __future__ import annotations
 
 import heapq
 import math
-from typing import Any, NamedTuple
+import time
+from itertools import zip_longest
+from typing import Any, Iterator, NamedTuple
 
 
 # The year the machine departs from and must return to.
@@ -91,35 +93,40 @@ RESTART_LIMIT = 12
 # capping at 160 entries cost 75% of the profit on that same timeline.
 BROAD_MENU = 48
 
-# Laps compound the money, so the useful count is logarithmic: once the budget can
-# take a year's whole supply in one go, another lap adds nothing.  Capping keeps
-# the simulated itinerary short on a big battery, and laps that turn out to be
-# barren cost no energy anyway - rendering drops stops that never trade.
-MAX_LAPS = 40
+# Laps compound the money, so the useful count is logarithmic in how much supply
+# there is to work through: once the budget can take a year's whole stock in one
+# go, another lap adds nothing.  The cap is generous because a lap that turns out
+# barren costs no energy at all - rendering drops stops that never trade - so the
+# only price of overshooting is simulation time, which the clock already governs.
+MAX_LAPS = 160
 
-# How many cycling stretches to simulate in full, and how long an itinerary may
-# get, against the size of the timeline.  There are O(years^2) stretches and each
-# is a whole simulation costing about O(stops^2 * stocks), so a fixed budget either
-# crawls on a long timeline or leaves a short one under-searched.
-#
-# Small cases get the full search and are the ones the exhaustive oracle checks.
-# Large cases lose breadth rather than time: the leading stretch is nearly always
-# the one that wins, and laps past what the supply can feed earn nothing anyway.
-SEARCH_BUDGETS = (
-    # (timeline size at or below, cycling stretches, longest itinerary)
-    (240, 12, 400),
-    (1200, 8, 260),
-    (4000, 5, 160),
-    (None, 3, 120),
-)
+# Wall-clock budget for a whole batch, split across its cases.  The search is
+# anytime: candidate itineraries are tried best-first and the clock decides how
+# many get run, so spending the budget buys breadth rather than risking a timeout.
+# Held under ten minutes with room for the response itself.
+TIME_BUDGET = 540.0
+
+# Floor on per-case time, so a long batch still searches each case properly rather
+# than slicing the budget into uselessly thin pieces.
+MIN_CASE_SECONDS = 2.0
+
+# Longest itinerary to simulate, by timeline size.  Simulation costs about
+# O(stops^2 * stocks), so an over-long route buys one deep candidate at the price
+# of many shallower ones - the clock is a better throttle than the route length.
+STOP_BUDGETS = ((240, 600), (1200, 400), (4000, 260), (None, 180))
+
+# How many of the strongest stretches to pair against each other.  Pairing is
+# quadratic in this and each pair yields several lap splits, so it buys breadth
+# quickly - the strongest stretches are the ones worth combining anyway.
+STRETCH_PAIRING = 14
 
 
-def _search_budget(years: int, stocks: int) -> tuple[int, int]:
+def _stop_budget(years: int, stocks: int) -> int:
     scale = years * max(stocks, 1)
-    for limit, candidates, stops in SEARCH_BUDGETS:
+    for limit, stops in STOP_BUDGETS:
         if limit is None or scale <= limit:
-            return candidates, stops
-    return SEARCH_BUDGETS[-1][1:]
+            return stops
+    return STOP_BUDGETS[-1][1]
 
 
 class Opportunity(NamedTuple):
@@ -257,6 +264,63 @@ def _lap_then_dive_route(
         return dive
     laps = max(0, min(laps, (max_stops - len(dive)) // len(lap)))
     return lap * laps + dive
+
+
+def _two_stretch_route(
+    years: list[int],
+    near: tuple[int, int],
+    near_laps: int,
+    deep: tuple[int, int],
+    deep_laps: int,
+    max_stops: int,
+) -> list[int]:
+    """Lap one stretch, carry the winnings down, lap a second deeper one, go home.
+
+    Neither single-stretch family can express this.  Cycling picks one stretch and
+    stays on it; lap-then-dive can only spend the winnings on a single pass.  When
+    the best engine is deep but the starting capital is too small to turn it, the
+    winning shape is to compound cheaply near home *and then* compound again on the
+    better stretch once there is enough money to work it.
+
+    The travel is free relative to reaching the deeper floor at all: descending
+    2037 -> near floor -> deep floor -> 2037 covers exactly 2 * (2037 - deep floor),
+    the same as a straight trip to the deeper floor, so the whole cost of the near
+    stretch is its own laps.
+    """
+    near_floor, near_peak = near
+    deep_floor, deep_peak = deep
+
+    def lap(floor: int, peak: int) -> list[int]:
+        inside = [year for year in years if floor <= year <= peak]
+        rising = [year for year in sorted(inside) if year > floor]
+        falling = sorted((year for year in inside if year < peak), reverse=True)
+        return rising + falling
+
+    approach = sorted((y for y in years if y >= near_floor), reverse=True)
+    descent = sorted(
+        (y for y in years if deep_floor <= y < near_floor), reverse=True
+    )
+    home = [y for y in sorted(years) if y > deep_floor]
+    near_lap, deep_lap = lap(*near), lap(*deep)
+
+    room = max_stops - len(approach) - len(descent) - len(home)
+    if near_lap:
+        near_laps = max(0, min(near_laps, room // len(near_lap)))
+        room -= near_laps * len(near_lap)
+    else:
+        near_laps = 0
+    if deep_lap:
+        deep_laps = max(0, min(deep_laps, room // len(deep_lap)))
+    else:
+        deep_laps = 0
+
+    return (
+        approach
+        + near_lap * near_laps
+        + descent
+        + deep_lap * deep_laps
+        + home
+    )
 
 
 def _energy_spent(actions: list[str]) -> int:
@@ -551,31 +615,36 @@ def _candidate_routes(
     reachable: list[int],
     markets: dict[int, dict[str, tuple[int, int]]],
     energy: int,
-) -> list[list[int]]:
-    """Itineraries worth trying, best-looking first.
+) -> "Iterator[list[int]]":
+    """Itineraries worth trying, best-looking first, for as long as the caller
+    keeps asking.
 
-    Two families.  Straight there-and-back to every depth covers the case where the
-    prize is simply far away.  Cycling covers the case where it is close but too
-    expensive to take in one bite, and needs the battery spent on laps instead of
-    distance.  Which wins is not decidable up front - it depends on supply, prices
-    and the budget together - so both are simulated and the money decides.
+    Three families.  Straight there-and-back covers a prize that is simply far
+    away.  Cycling covers one that is close but too expensive to take in one bite,
+    where the battery is better spent on laps than on distance.  Lap-then-dive
+    covers a distant prize the starting capital cannot use on arrival.  Which wins
+    depends on supply, prices and budget together and is not decidable up front,
+    so they are simulated and the money decides.
 
-    Cycling pairs are scored before simulating, since there are O(years^2) of them.
-    A lap multiplies the money by roughly the best ratio inside the stretch, so
-    `laps * log(ratio)` ranks them by the wealth they could compound to.
+    There are O(years^2) stretches in each cycling family, far too many to run, so
+    they are scored first and yielded best-first.  A lap multiplies the money by
+    roughly the best ratio inside the stretch, which makes `laps * log(ratio)` a
+    ranking by the wealth it could compound to.  Nothing is truncated here - the
+    caller stops when its clock runs out, so a small case gets an exhaustive search
+    and a large one still spends its whole budget on the most promising stretches.
     """
     ascending = sorted(reachable)
-    breadth, max_stops = _search_budget(
+    max_stops = _stop_budget(
         len(ascending), max((len(market) for market in markets.values()), default=1)
     )
     # Only the deepest straight trip is worth simulating: it passes through every
     # shallower year on the way, so it can do anything a shallower trip could, and
     # the battery it saves has nowhere else to go within this family.
-    routes = [_straight_route(reachable, ascending[0])]
+    yield _straight_route(reachable, ascending[0])
 
     # Best buy price and best sell price for every stretch, swept in one pass so
     # scoring stays O(years^2 * stocks) rather than re-scanning per pair.
-    scored: list[tuple[float, int, int, int]] = []
+    cycles: list[tuple[float, int, int, int]] = []
     for low_index, deepest in enumerate(ascending):
         travel = 2 * (START_YEAR - deepest)
         if travel > energy:
@@ -601,17 +670,28 @@ def _candidate_routes(
             if ratio <= 1.0:
                 continue
             laps = min(laps, MAX_LAPS)
-            scored.append((laps * math.log(ratio), deepest, peak, laps))
-
-    scored.sort(reverse=True)
-    for _, deepest, peak, laps in scored[:breadth]:
-        routes.append(_cycling_route(reachable, deepest, peak, laps, max_stops))
+            cycles.append((laps * math.log(ratio), deepest, peak, laps))
+    cycles.sort(reverse=True)
 
     # Compound close to home first, then spend the winnings on one deeper trip.
     warmups: list[tuple[float, int, int, int]] = []
+    best_ratio_above: dict[int, float] = {}
+    for floor_index, lap_floor in enumerate(ascending):
+        cheapest = {}
+        dearest = {}
+        for year in ascending[floor_index:]:
+            for stock, (price, quantity) in markets[year].items():
+                if quantity > 0 and price < cheapest.get(stock, price + 1):
+                    cheapest[stock] = price
+                if price > dearest.get(stock, 0):
+                    dearest[stock] = price
+        best_ratio_above[lap_floor] = max(
+            (dearest[stock] / cheapest[stock] for stock in cheapest), default=1.0
+        )
     for lap_floor in ascending:
         lap_travel = 2 * (START_YEAR - lap_floor)
-        if lap_travel <= 0:
+        ratio = best_ratio_above[lap_floor]
+        if lap_travel <= 0 or ratio <= 1.0:
             continue
         for deepest in ascending:
             dive_travel = 2 * (START_YEAR - deepest)
@@ -620,18 +700,81 @@ def _candidate_routes(
             laps = min((energy - dive_travel) // lap_travel, MAX_LAPS)
             if laps <= 0:
                 continue
-            warmups.append((float(laps), lap_floor, deepest, laps))
+            warmups.append((laps * math.log(ratio), lap_floor, deepest, laps))
     warmups.sort(reverse=True)
-    for _, lap_floor, deepest, laps in warmups[:breadth]:
-        routes.append(
-            _lap_then_dive_route(reachable, lap_floor, deepest, laps, max_stops)
-        )
-    return routes
+
+    # Pairs of stretches: compound cheaply near home, then again on a better but
+    # deeper engine.  There are O(years^4) of these, so only the strongest few
+    # stretches are paired up, and the laps between them are split a handful of
+    # ways rather than optimised - the clock spends its time simulating, not
+    # searching a split that the simulation itself will judge.
+    ranked = sorted(
+        {
+            (deepest, peak): (ratio, span)
+            for ratio, deepest, peak, span in (
+                (math.exp(score / max(laps, 1)), lo, hi, hi - lo)
+                for score, lo, hi, laps in cycles
+            )
+        }.items(),
+        key=lambda item: -item[1][0],
+    )[:STRETCH_PAIRING]
+
+    pairs: list[tuple[float, tuple[int, int], int, tuple[int, int], int]] = []
+    for (near_floor, near_peak), (near_ratio, near_span) in ranked:
+        for (deep_floor, deep_peak), (deep_ratio, deep_span) in ranked:
+            if deep_floor > near_floor or near_span <= 0 or deep_span <= 0:
+                continue
+            spare = energy - 2 * (START_YEAR - deep_floor)
+            if spare <= 0:
+                continue
+            budget = spare // 2
+            for numerator, denominator in ((0, 1), (1, 3), (1, 2), (2, 3), (1, 1)):
+                near_laps = min(
+                    MAX_LAPS, budget * numerator // denominator // near_span
+                )
+                left = budget - near_laps * near_span
+                deep_laps = min(MAX_LAPS, left // deep_span)
+                if near_laps <= 0 and deep_laps <= 0:
+                    continue
+                score = near_laps * math.log(near_ratio) + deep_laps * math.log(
+                    deep_ratio
+                )
+                pairs.append(
+                    (
+                        score,
+                        (near_floor, near_peak),
+                        near_laps,
+                        (deep_floor, deep_peak),
+                        deep_laps,
+                    )
+                )
+    pairs.sort(key=lambda item: -item[0])
+
+    # Interleaved, so no family is starved if the clock stops early.
+    for cycle, warmup, pair in zip_longest(cycles, warmups, pairs):
+        if cycle is not None:
+            _, deepest, peak, laps = cycle
+            yield _cycling_route(reachable, deepest, peak, laps, max_stops)
+        if warmup is not None:
+            _, lap_floor, deepest, laps = warmup
+            yield _lap_then_dive_route(
+                reachable, lap_floor, deepest, laps, max_stops
+            )
+        if pair is not None:
+            _, near, near_laps, deep, deep_laps = pair
+            yield _two_stretch_route(
+                reachable, near, near_laps, deep, deep_laps, max_stops
+            )
 
 
-def solve_case(case: Any) -> list[str]:
+def solve_case(case: Any, deadline: float | None = None) -> list[str]:
     """The action list for one test case, or `[]` when nothing is worth doing -
-    staying in 2037 is always legal and always costs nothing."""
+    staying in 2037 is always legal and always costs nothing.
+
+    `deadline` is a `time.monotonic()` reading to stop searching at.  The first
+    candidate is always simulated, so a deadline already in the past still yields a
+    real answer rather than an empty one.
+    """
     if not isinstance(case, dict):
         return []
 
@@ -649,7 +792,9 @@ def solve_case(case: Any) -> list[str]:
 
     best_actions: list[str] = []
     best_cash = capital
-    for route in _candidate_routes(reachable, markets, energy):
+    for tried, route in enumerate(_candidate_routes(reachable, markets, energy)):
+        if tried and deadline is not None and time.monotonic() >= deadline:
+            break
         cash, trades = _simulate(route, markets, capital)
         if cash <= best_cash:
             continue
@@ -664,7 +809,22 @@ def solve_case(case: Any) -> list[str]:
 
 
 def solve_batch(batch: Any) -> list[list[str]]:
-    """One action list per test case, in the order received."""
+    """One action list per test case, in the order received.
+
+    The wall-clock budget is shared out as we go rather than divided up front, so a
+    case that finishes early hands the rest of its slice to whatever follows.  Each
+    case is guaranteed a floor of time, because slicing a long batch strictly
+    evenly would leave every case too little to search with.
+    """
     if not isinstance(batch, list):
         raise ValueError("request body must be a JSON array of test cases")
-    return [solve_case(case) for case in batch]
+
+    finish_by = time.monotonic() + TIME_BUDGET
+    results = []
+    for index, case in enumerate(batch):
+        remaining_cases = len(batch) - index
+        share = max(
+            MIN_CASE_SECONDS, (finish_by - time.monotonic()) / remaining_cases
+        )
+        results.append(solve_case(case, min(finish_by, time.monotonic() + share)))
+    return results
