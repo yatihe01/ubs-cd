@@ -13,6 +13,7 @@ also survive legs because the same five personalities return in every leg.
 
 from __future__ import annotations
 
+import math
 from collections import OrderedDict
 from dataclasses import dataclass
 from itertools import product
