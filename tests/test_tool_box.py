@@ -61,12 +61,31 @@ def test_agent_sees_purpose_specific_tool_schemas():
         "evaluate_expression",
         "calculate",
         "recognize_shape",
+        "find_open_venues",
+        "find_group_meeting_time",
+        "find_minimum_travel_meeting_point",
+        "plan_group_outing",
         "choose_next_node",
         "retrieve_study_passages",
     ]
     assert "complete final answer" in tools["answer_name_question"].description
     assert tools["answer_name_question"].parameters["required"] == ["question"]
     assert tools["evaluate_expression"].parameters["required"] == ["expression"]
+    assert tools["find_group_meeting_time"].parameters["required"] == [
+        "day",
+        "friends",
+        "window_start",
+        "window_end",
+    ]
+    assert tools["plan_group_outing"].parameters["required"] == [
+        "day",
+        "your_x",
+        "your_y",
+        "friends",
+        "window_start",
+        "window_end",
+    ]
+    assert "MANDATORY" in tools["plan_group_outing"].description
     assert "multiple operators" in tools["calculate"].description
     assert tools["retrieve_study_passages"].parameters["required"] == [
         "question",
