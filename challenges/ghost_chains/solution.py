@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import defaultdict, deque
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -20,9 +20,8 @@ class Transaction:
 
 class GhostChainsModel:
     def __init__(self) -> None:
-        self.transactions: deque[Transaction] = deque()
+        self.transactions: list[Transaction] = []
         self.graph: defaultdict[str, set[str]] = defaultdict(set)
-        self.edge_counts: defaultdict[tuple[str, str], int] = defaultdict(int)
         self.scores: dict[str, tuple[Transaction, float]] = {}
         self.latest_time: datetime | None = None
 
@@ -37,38 +36,33 @@ class GhostChainsModel:
             return previous[1]
 
         current_time = max(self.latest_time or transaction.created_at, transaction.created_at)
-        self._expire(current_time - LOOKBACK)
+        cutoff = current_time - LOOKBACK
+        self.transactions = [
+            item for item in self.transactions if item.created_at > cutoff
+        ]
+        self._rebuild_graph()
         score = self._score(transaction.from_user, transaction.to_user)
 
-        self.transactions.append(transaction)
-        edge = (transaction.from_user, transaction.to_user)
-        self.edge_counts[edge] += 1
-        self.graph[transaction.from_user].add(transaction.to_user)
+        if transaction.created_at > cutoff:
+            self.transactions.append(transaction)
         self.scores[transaction.tx_id] = (transaction, score)
         self.latest_time = current_time
         return score
 
-    def _expire(self, cutoff: datetime) -> None:
-        while self.transactions and self.transactions[0].created_at <= cutoff:
-            transaction = self.transactions.popleft()
-            edge = (transaction.from_user, transaction.to_user)
-            self.edge_counts[edge] -= 1
-            if self.edge_counts[edge] <= 0:
-                del self.edge_counts[edge]
-                self.graph[transaction.from_user].discard(transaction.to_user)
-            self.scores.pop(transaction.tx_id, None)
+    def _rebuild_graph(self) -> None:
+        self.graph = defaultdict(set)
+        for transaction in self.transactions:
+            self.graph[transaction.from_user].add(transaction.to_user)
 
     def _score(self, source: str, target: str) -> float:
-        return round(
-            min(
-                0.08 * bool(self.graph.get(source))
-                + 0.34 * min(_path_count(self.graph, target, source), 2)
-                + 0.12 * min(_common_ancestor_count(self.graph, source, target), 2)
-                + 0.12 * bool(_has_cycle(self.graph) and _path_count(self.graph, target, source)),
-                1.0,
-            ),
-            6,
+        return_paths = _path_count(self.graph, target, source)
+        convergence_paths = sum(
+            _path_count(self.graph, ancestor, target)
+            for ancestor in _ancestors(self.graph, source)
+            if ancestor != source
         )
+        score = 0.38 * min(return_paths, 2) + 0.16 * min(convergence_paths, 4)
+        return round(min(score, 1.0), 6)
 
 
 def parse_created_at(value: Any) -> datetime:
@@ -131,7 +125,3 @@ def _ancestors(graph: dict[str, set[str]], node: str) -> set[str]:
 
 def _common_ancestor_count(graph: dict[str, set[str]], source: str, target: str) -> int:
     return len(_ancestors(graph, source) & _ancestors(graph, target))
-
-
-def _has_cycle(graph: dict[str, set[str]]) -> bool:
-    return any(_path_count(graph, node, node) for node in graph)
